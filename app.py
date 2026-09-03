@@ -369,7 +369,7 @@ def inject_css() -> None:
             padding: .60rem .70rem; border-radius: 10px; margin: .12rem 0;
         }}
         [data-testid="stSidebar"] [role="radiogroup"] label:hover {{ background: rgba(110,193,228,.18); }}
-        .block-container {{ max-width: 1180px; padding-top: 1.5rem; padding-bottom: 3rem; }}
+        .block-container {{ max-width: 1180px; padding-top: 4.5rem; padding-bottom: 3rem; }}
         h1, h2, h3 {{ color: {DEEP_BLUE}; letter-spacing: -.02em; }}
         .brand-row {{ display:flex; align-items:center; gap:.75rem; margin-bottom:1.1rem; }}
         .brand-mark {{
