@@ -57,6 +57,16 @@ BILLERS = {
     "Insurance": ["AIA", "Allianz", "Prudential"],
 }
 
+NAVIGATION_LABELS = {
+    "Dashboard": "🏠  Dashboard",
+    "Transfer": "↗️  Transfer",
+    "Pay Bills": "🧾  Pay Bills",
+    "Credit Card": "💳  Credit Card",
+    "Deposit": "➕  Deposit",
+    "Transactions": "📄  Transactions",
+    "Security": "🛡️  Security",
+}
+
 
 class BankingError(Exception):
     """A user-friendly banking validation error."""
@@ -491,7 +501,8 @@ def inject_css() -> None:
     inside_background = image_data_uri(APP_DIR / "assets" / "finora_dashboard_background.png")
     if st.session_state.get("authenticated") and inside_background:
         page_background = (
-            "linear-gradient(rgba(255, 255, 255, .38), rgba(234, 246, 251, .52)), "
+            "linear-gradient(135deg, rgba(174, 215, 234, .76) 0%, "
+            "rgba(202, 230, 239, .78) 52%, rgba(177, 221, 218, .74) 100%), "
             f"url('{inside_background}') center center / cover fixed no-repeat"
         )
     elif login_background:
@@ -509,9 +520,23 @@ def inject_css() -> None:
         [data-testid="stSidebar"] {{ background: linear-gradient(180deg, #0B2D55 0%, {DEEP_BLUE} 70%, #145B79 100%); }}
         [data-testid="stSidebar"] * {{ color: white; }}
         [data-testid="stSidebar"] [role="radiogroup"] label {{
-            padding: .60rem .70rem; border-radius: 10px; margin: .12rem 0;
+            padding:.72rem .82rem; border-radius:11px; margin:.14rem 0;
+            border-left:3px solid transparent; transition:all .20s ease;
+            cursor:pointer;
         }}
-        [data-testid="stSidebar"] [role="radiogroup"] label:hover {{ background: rgba(110,193,228,.18); }}
+        [data-testid="stSidebar"] [role="radiogroup"] input[type="radio"] {{
+            display:none !important;
+        }}
+        [data-testid="stSidebar"] [role="radiogroup"] label:hover {{
+            background:rgba(110,193,228,.17); transform:translateX(3px);
+        }}
+        [data-testid="stSidebar"] [role="radiogroup"] label:has(input:checked) {{
+            background:linear-gradient(90deg, rgba(110,193,228,.32), rgba(143,217,199,.16));
+            border-left-color:{MINT_GREEN}; box-shadow:0 7px 18px rgba(2,24,55,.20);
+        }}
+        [data-testid="stSidebar"] [role="radiogroup"] label:has(input:checked) p {{
+            color:#FFFFFF !important; font-weight:750;
+        }}
         [data-testid="stSidebar"] div.stButton > button {{
             width:100%; color:#FFFFFF !important;
             background:rgba(255,255,255,.06) !important;
@@ -590,6 +615,18 @@ def inject_css() -> None:
         }}
         div[data-testid="stMetric"] label {{ color:#567286; }}
         div[data-testid="stMetricValue"] {{ color:{DEEP_BLUE}; }}
+        .card-number-panel {{
+            min-height:108px; padding:1rem 1.05rem; border-radius:16px;
+            background:rgba(255,255,255,.96); border:1px solid #D8EDF6;
+            box-shadow:0 8px 24px #123B6D12; display:flex;
+            flex-direction:column; justify-content:center;
+        }}
+        .card-number-label {{ color:#567286; font-size:.88rem; margin-bottom:.35rem; }}
+        .card-number-value {{
+            color:{DEEP_BLUE}; font-size:clamp(1.12rem, 2.1vw, 1.72rem);
+            line-height:1.2; letter-spacing:.025em; white-space:nowrap;
+        }}
+        .card-number-note {{ color:#7890A0; font-size:.68rem; margin-top:.32rem; letter-spacing:.08em; }}
         div.stButton > button, div.stDownloadButton > button {{
             border-radius:10px; border:1px solid {DEEP_BLUE}; font-weight:650;
         }}
@@ -677,6 +714,16 @@ def change_page(page: str) -> None:
     st.rerun()
 
 
+def toggle_account_details() -> None:
+    """Toggle sidebar privacy before Streamlit renders the current page."""
+    st.session_state.account_visible = not bool(st.session_state.get("account_visible", False))
+
+
+def toggle_card_details() -> None:
+    """Toggle the demonstration card number without changing navigation."""
+    st.session_state.card_visible = not bool(st.session_state.get("card_visible", False))
+
+
 # -----------------------------------------------------------------------------
 # Login and sidebar
 # -----------------------------------------------------------------------------
@@ -739,9 +786,12 @@ def sidebar(user: dict[str, Any]) -> str:
             st.markdown("### RM ••••••")
 
         visibility_label = "🙈 Hide account details" if account_visible else "👁 Show account details"
-        if st.button(visibility_label, key="account_visibility_toggle", use_container_width=True):
-            st.session_state.account_visible = not account_visible
-            st.rerun()
+        st.button(
+            visibility_label,
+            key="account_visibility_toggle",
+            on_click=toggle_account_details,
+            use_container_width=True,
+        )
         st.divider()
         pages = [
             "Dashboard", "Transfer", "Pay Bills", "Credit Card",
@@ -749,7 +799,13 @@ def sidebar(user: dict[str, Any]) -> str:
         ]
         if st.session_state.get("navigation") not in pages:
             st.session_state.navigation = "Dashboard"
-        page = st.radio("Banking menu", pages, key="navigation", label_visibility="collapsed")
+        page = st.radio(
+            "Banking menu",
+            pages,
+            key="navigation",
+            format_func=lambda page_name: NAVIGATION_LABELS[page_name],
+            label_visibility="collapsed",
+        )
         st.divider()
         if st.button("Sign out", use_container_width=True):
             sign_out()
@@ -988,7 +1044,7 @@ def show_transaction_result() -> None:
 
 def transfer_page(user: dict[str, Any]) -> None:
     """Collect and validate a transfer before requesting OTP approval."""
-    page_title("Transfer Money", "Send funds securely to another Finora account.")
+    page_title("Transfer Money", "Send funds to a Finora or simulated external account.")
     show_transaction_result()
     st.metric("Available balance", money(user["balance"]))
     with st.form("transfer_form"):
@@ -1080,11 +1136,23 @@ def credit_card_page(user: dict[str, Any]) -> None:
         else masked_card_number(card["number"])
     )
     with c1:
-        st.metric("Card", displayed_card)
+        st.markdown(
+            f"""
+            <div class="card-number-panel">
+              <div class="card-number-label">Card</div>
+              <div class="card-number-value">{html.escape(displayed_card)}</div>
+              <div class="card-number-note">DEMONSTRATION CARD</div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
         card_button_label = "🙈 Hide card number" if card_visible else "👁 Show card number"
-        if st.button(card_button_label, key="card_visibility_toggle", use_container_width=True):
-            st.session_state.card_visible = not card_visible
-            st.rerun()
+        st.button(
+            card_button_label,
+            key="card_visibility_toggle",
+            on_click=toggle_card_details,
+            use_container_width=True,
+        )
     c2.metric("Outstanding", money(card["outstanding"]))
     c3.metric("Available credit", money(card["limit"] - card["outstanding"]))
     minimum_payment = min(card["outstanding"], round(max(50.0, card["outstanding"] * 0.10), 2)) if card["outstanding"] else 0.0
