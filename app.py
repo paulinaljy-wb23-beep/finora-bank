@@ -495,7 +495,7 @@ def sign_out(message: str | None = None) -> None:
 
 def change_page(page: str) -> None:
     """Navigate from a quick-action button to a sidebar page."""
-    st.session_state.navigation = page
+    st.session_state.requested_page = page
     st.rerun()
 
 
@@ -915,6 +915,12 @@ def main_app() -> None:
         sign_out("timeout")
         st.rerun()
     st.session_state.last_activity = time.time()
+
+    # Apply Quick Action navigation before creating the sidebar widget
+    requested_page = st.session_state.pop("requested_page", None)
+
+    if requested_page:
+        st.session_state.navigation = requested_page
 
     try:
         data = load_data()
