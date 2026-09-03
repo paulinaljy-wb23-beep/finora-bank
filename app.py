@@ -40,7 +40,8 @@ SESSION_TIMEOUT_SECONDS = 5 * 60
 ACCOUNT_LOCK_SECONDS = 60
 MAX_LOGIN_ATTEMPTS = 3
 ACCOUNT_NUMBER_LENGTH = 10
-DATA_SCHEMA_VERSION = 2
+DATA_SCHEMA_VERSION = 3
+DEMO_CARD_NUMBER = "5212345678904821"
 
 DEEP_BLUE = "#123B6D"
 SKY_BLUE = "#6EC1E4"
@@ -152,7 +153,7 @@ def create_seed_data() -> dict[str, Any]:
                 "account_number": "8800251573",
                 "password": hash_password("Finora@123"),
                 "balance": 15420.80,
-                "credit_card": {"number": "**** 4821", "limit": 10000.0, "outstanding": 2000.0},
+                "credit_card": {"number": DEMO_CARD_NUMBER, "limit": 10000.0, "outstanding": 2000.0},
                 "failed_attempts": 0,
                 "locked_until": 0.0,
                 "transactions": paulina_transactions,
@@ -162,7 +163,7 @@ def create_seed_data() -> dict[str, Any]:
                 "account_number": "8800259999",
                 "password": hash_password("Alex@123"),
                 "balance": 8250.00,
-                "credit_card": {"number": "**** 1109", "limit": 6000.0, "outstanding": 780.0},
+                "credit_card": {"number": "5412098765431109", "limit": 6000.0, "outstanding": 780.0},
                 "failed_attempts": 0,
                 "locked_until": 0.0,
                 "transactions": [
@@ -216,10 +217,22 @@ def load_data() -> dict[str, Any]:
                 data["users"]["paulina"]["full_name"] = "Paulina"
                 data_changed = True
 
-            if int(data.get("schema_version", 1)) < DATA_SCHEMA_VERSION:
+            current_schema = int(data.get("schema_version", 1))
+            if current_schema < 2:
                 paulina = data["users"].get("paulina")
                 if paulina:
                     paulina["credit_card"]["outstanding"] = 2000.0
+                data_changed = True
+
+            if current_schema < 3:
+                paulina = data["users"].get("paulina")
+                if paulina:
+                    paulina["credit_card"]["number"] = DEMO_CARD_NUMBER
+                alex = data["users"].get("alex")
+                if alex:
+                    alex["credit_card"]["number"] = "5412098765431109"
+
+            if current_schema < DATA_SCHEMA_VERSION:
                 data["schema_version"] = DATA_SCHEMA_VERSION
                 data_changed = True
 
@@ -244,6 +257,23 @@ def valid_account_number(account_number: str) -> bool:
     """Return True only for an account number containing exactly 10 digits."""
     cleaned = account_number.strip()
     return cleaned.isdigit() and len(cleaned) == ACCOUNT_NUMBER_LENGTH
+
+
+def card_number_digits(card_number: str) -> str:
+    """Return only the numeric characters from a demonstration card number."""
+    return "".join(character for character in str(card_number) if character.isdigit())
+
+
+def masked_card_number(card_number: str) -> str:
+    """Mask a card number while keeping its final four digits visible."""
+    digits = card_number_digits(card_number)
+    return f"•••• •••• •••• {digits[-4:]}"
+
+
+def visible_card_number(card_number: str) -> str:
+    """Group a full demonstration card number into readable blocks of four."""
+    digits = card_number_digits(card_number)
+    return " ".join(digits[index:index + 4] for index in range(0, len(digits), 4))
 
 
 # -----------------------------------------------------------------------------
@@ -399,7 +429,13 @@ def process_transaction(username: str, pending: dict[str, Any]) -> dict[str, Any
                 raise BankingError("Insufficient balance for this credit card payment.")
             user["balance"] = round(user["balance"] - amount, 2)
             user["credit_card"]["outstanding"] = round(outstanding - amount, 2)
-            add_transaction(user, "Credit Card", f"Card payment {user['credit_card']['number']}", -amount, ref)
+            add_transaction(
+                user,
+                "Credit Card",
+                f"Card payment {masked_card_number(user['credit_card']['number'])}",
+                -amount,
+                ref,
+            )
 
         elif kind == "Deposit":
             # This is a simulation: no real cash or external payment is accepted.
@@ -624,7 +660,7 @@ def sign_out(message: str | None = None) -> None:
     for key in [
         "authenticated", "username", "last_activity", "pending_transaction",
         "demo_otp", "transaction_result", "navigation", "requested_page",
-        "account_visible",
+        "account_visible", "card_visible",
     ]:
         st.session_state.pop(key, None)
     if message:
@@ -1037,13 +1073,43 @@ def credit_card_page(user: dict[str, Any]) -> None:
     page_title("Credit Card", "View and pay your Finora credit card securely.")
     show_transaction_result()
     c1, c2, c3 = st.columns(3)
-    c1.metric("Card", card["number"])
+    card_visible = bool(st.session_state.get("card_visible", False))
+    displayed_card = (
+        visible_card_number(card["number"])
+        if card_visible
+        else masked_card_number(card["number"])
+    )
+    with c1:
+        st.metric("Card", displayed_card)
+        card_button_label = "🙈 Hide card number" if card_visible else "👁 Show card number"
+        if st.button(card_button_label, key="card_visibility_toggle", use_container_width=True):
+            st.session_state.card_visible = not card_visible
+            st.rerun()
     c2.metric("Outstanding", money(card["outstanding"]))
     c3.metric("Available credit", money(card["limit"] - card["outstanding"]))
     minimum_payment = min(card["outstanding"], round(max(50.0, card["outstanding"] * 0.10), 2)) if card["outstanding"] else 0.0
+
+    # Keep this selector outside the form so choosing Custom amount reruns the
+    # page immediately and enables the amount input field.
+    option = st.radio(
+        "Payment option",
+        ["Minimum payment", "Full payment", "Custom amount"],
+        horizontal=True,
+        key="card_payment_option",
+    )
     with st.form("card_form"):
-        option = st.radio("Payment option", ["Minimum payment", "Full payment", "Custom amount"], horizontal=True)
-        custom_amount = st.number_input("Custom amount (RM)", min_value=0.0, step=10.0, format="%.2f", disabled=option != "Custom amount")
+        custom_amount = 0.0
+        if option == "Minimum payment":
+            st.info(f"Payment amount: {money(minimum_payment)}")
+        elif option == "Full payment":
+            st.info(f"Payment amount: {money(card['outstanding'])}")
+        else:
+            custom_amount = st.number_input(
+                "Custom amount (RM)",
+                min_value=0.0,
+                step=10.0,
+                format="%.2f",
+            )
         submitted = st.form_submit_button("Continue to OTP", type="primary")
     if submitted:
         amount = minimum_payment if option == "Minimum payment" else card["outstanding"] if option == "Full payment" else custom_amount
