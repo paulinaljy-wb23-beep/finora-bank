@@ -9,6 +9,7 @@ to a real bank, payment gateway, SMS provider, or cash deposit machine.
 from __future__ import annotations
 
 import csv
+import base64
 import hashlib
 import hmac
 import html
@@ -357,12 +358,30 @@ def create_pending_transaction(kind: str, details: dict[str, Any], summary: str)
 # -----------------------------------------------------------------------------
 # Visual helpers
 # -----------------------------------------------------------------------------
+def image_data_uri(path: Path) -> str | None:
+    """Convert a local image into an embeddable CSS data URI."""
+    if not path.exists():
+        return None
+    mime_type = "image/png" if path.suffix.lower() == ".png" else "image/jpeg"
+    encoded = base64.b64encode(path.read_bytes()).decode("ascii")
+    return f"data:{mime_type};base64,{encoded}"
+
+
 def inject_css() -> None:
     """Apply the Finora blue, sky-blue, white and mint visual identity."""
+    background_image = image_data_uri(APP_DIR / "assets" / "finora_background_v2.png")
+    if not st.session_state.get("authenticated") and background_image:
+        page_background = (
+            "linear-gradient(rgba(5, 28, 65, .18), rgba(5, 45, 88, .30)), "
+            f"url('{background_image}') center center / cover fixed no-repeat"
+        )
+    else:
+        page_background = f"linear-gradient(135deg, {LIGHT_BLUE} 0%, #FFFFFF 55%, #F1FFFB 100%)"
+
     st.markdown(
         f"""
         <style>
-        .stApp {{ background: linear-gradient(135deg, {LIGHT_BLUE} 0%, #FFFFFF 55%, #F1FFFB 100%); }}
+        .stApp {{ background: {page_background}; min-height: 100vh; }}
         [data-testid="stSidebar"] {{ background: linear-gradient(180deg, #0B2D55 0%, {DEEP_BLUE} 70%, #145B79 100%); }}
         [data-testid="stSidebar"] * {{ color: white; }}
         [data-testid="stSidebar"] [role="radiogroup"] label {{
@@ -403,9 +422,10 @@ def inject_css() -> None:
             border-color:{SKY_BLUE}; color:{DEEP_BLUE}; box-shadow:0 5px 16px #6EC1E435;
         }}
         div[data-testid="stForm"] {{
-            background:rgba(255,255,255,.92); border:1px solid #D7EDF5; border-radius:16px;
-            padding:1.1rem 1.2rem; box-shadow:0 8px 22px #123B6D10;
+            background:rgba(255,255,255,.96); border:1px solid #D7EDF5; border-radius:16px;
+            padding:1.1rem 1.2rem; box-shadow:0 12px 32px #071F4140;
         }}
+        [data-testid="stExpander"] {{ background:rgba(255,255,255,.92); border-radius:12px; }}
         .success-card {{
             background:#E9FBF6; border-left:5px solid {MINT_GREEN}; border-radius:14px;
             padding:1.1rem 1.2rem; color:{DARK_NAVY}; margin:.75rem 0;
@@ -418,8 +438,13 @@ def inject_css() -> None:
     )
 
 
-def brand_header() -> None:
-    """Render a compact text-based logo that needs no external image file."""
+def brand_header(compact: bool = False) -> None:
+    """Render the uploaded logo, with a text fallback if the file is absent."""
+    logo_path = APP_DIR / "assets" / "finora_logo.png"
+    if logo_path.exists():
+        st.image(str(logo_path), width=185 if compact else 240)
+        return
+
     st.markdown(
         """
         <div class="brand-row">
@@ -887,7 +912,7 @@ def main_app() -> None:
         return
 
     page = sidebar(user)
-    brand_header()
+    brand_header(compact=True)
     pages = {
         "Dashboard": dashboard_page,
         "Transfer": transfer_page,
