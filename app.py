@@ -369,11 +369,17 @@ def image_data_uri(path: Path) -> str | None:
 
 def inject_css() -> None:
     """Apply the Finora blue, sky-blue, white and mint visual identity."""
-    background_image = image_data_uri(APP_DIR / "assets" / "finora_background_v2.png")
-    if not st.session_state.get("authenticated") and background_image:
+    login_background = image_data_uri(APP_DIR / "assets" / "finora_background_v2.png")
+    inside_background = image_data_uri(APP_DIR / "assets" / "finora_dashboard_background.png")
+    if st.session_state.get("authenticated") and inside_background:
+        page_background = (
+            "linear-gradient(rgba(255, 255, 255, .38), rgba(234, 246, 251, .52)), "
+            f"url('{inside_background}') center center / cover fixed no-repeat"
+        )
+    elif login_background:
         page_background = (
             "linear-gradient(rgba(5, 28, 65, .18), rgba(5, 45, 88, .30)), "
-            f"url('{background_image}') center center / cover fixed no-repeat"
+            f"url('{login_background}') center center / cover fixed no-repeat"
         )
     else:
         page_background = f"linear-gradient(135deg, {LIGHT_BLUE} 0%, #FFFFFF 55%, #F1FFFB 100%)"
@@ -416,6 +422,26 @@ def inject_css() -> None:
         }}
         .hero h2 {{ color:white; margin:0 0 .2rem 0; }}
         .hero p {{ color:#DDF6FF; margin:0; }}
+        .dashboard-hero {{
+            min-height:260px; border-radius:22px; padding:2.2rem 2.35rem;
+            display:flex; flex-direction:column; justify-content:center;
+            color:white; margin-bottom:1.15rem; overflow:hidden;
+            background-size:cover; background-position:center;
+            box-shadow:0 18px 42px #123B6D35;
+        }}
+        .dashboard-hero .eyebrow {{
+            color:{MINT_GREEN}; font-size:.78rem; letter-spacing:.14em;
+            font-weight:800; margin-bottom:.65rem;
+        }}
+        .dashboard-hero h2 {{ color:white; font-size:2.15rem; max-width:480px; margin:0 0 .65rem 0; }}
+        .dashboard-hero p {{ color:#E3F7FF; max-width:455px; font-size:1rem; margin:0; line-height:1.55; }}
+        .feature-card {{
+            min-height:115px; padding:1rem 1.05rem; border-radius:15px;
+            background:rgba(255,255,255,.88); border:1px solid #D6ECF5;
+            box-shadow:0 8px 24px #123B6D12; margin:.35rem 0 1rem 0;
+        }}
+        .feature-card strong {{ color:{DEEP_BLUE}; font-size:1rem; }}
+        .feature-card p {{ color:#607B8C; font-size:.86rem; margin:.42rem 0 0 0; line-height:1.45; }}
         div[data-testid="stMetric"] {{
             background:rgba(255,255,255,.96); border:1px solid #D8EDF6; border-radius:16px;
             padding:1rem 1.05rem; box-shadow:0 8px 24px #123B6D12;
@@ -486,7 +512,7 @@ def sign_out(message: str | None = None) -> None:
     """Clear all authentication and transaction state."""
     for key in [
         "authenticated", "username", "last_activity", "pending_transaction",
-        "demo_otp", "transaction_result", "navigation",
+        "demo_otp", "transaction_result", "navigation", "requested_page",
     ]:
         st.session_state.pop(key, None)
     if message:
@@ -495,6 +521,10 @@ def sign_out(message: str | None = None) -> None:
 
 def change_page(page: str) -> None:
     """Navigate from a quick-action button to a sidebar page."""
+    # The sidebar radio using the ``navigation`` key has already been rendered
+    # when a Dashboard quick-action button is clicked. Streamlit does not allow
+    # that widget's value to be changed afterward in the same run, so store the
+    # request under a separate key and apply it before the next sidebar render.
     st.session_state.requested_page = page
     st.rerun()
 
@@ -582,13 +612,29 @@ def page_title(title: str, subtitle: str) -> None:
 def dashboard_page(user: dict[str, Any]) -> None:
     """Show balance, quick actions, recent activity and spending analytics."""
     first_name = html.escape(user["full_name"].split()[0])
-    st.markdown(
-        f"""
-        <div class="hero"><h2>Good day, {first_name}</h2>
-        <p>Here is your financial overview and recent Finora activity.</p></div>
-        """,
-        unsafe_allow_html=True,
-    )
+    hero_image = image_data_uri(APP_DIR / "assets" / "finora_dashboard_hero.png")
+    if hero_image:
+        st.markdown(
+            f"""
+            <div class="dashboard-hero" style="background-image:
+              linear-gradient(90deg, rgba(6,35,77,.98) 0%, rgba(12,64,116,.88) 42%,
+              rgba(12,64,116,.08) 72%), url('{hero_image}');">
+              <div class="eyebrow">SECURE DIGITAL BANKING</div>
+              <h2>Welcome back, {first_name}.</h2>
+              <p>Manage your money confidently with secure payments, clear insights
+              and everyday banking in one place.</p>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+    else:
+        st.markdown(
+            f"""
+            <div class="hero"><h2>Good day, {first_name}</h2>
+            <p>Here is your financial overview and recent Finora activity.</p></div>
+            """,
+            unsafe_allow_html=True,
+        )
 
     transactions = user["transactions"]
     outgoing = [t for t in transactions if float(t["amount"]) < 0]
@@ -610,6 +656,23 @@ def dashboard_page(user: dict[str, Any]) -> None:
         change_page("Credit Card")
     if q4.button("Make deposit", use_container_width=True):
         change_page("Deposit")
+
+    feature1, feature2, feature3 = st.columns(3)
+    feature1.markdown(
+        '<div class="feature-card"><strong>Secure by design</strong>'
+        '<p>Password hashing, account protection and OTP verification.</p></div>',
+        unsafe_allow_html=True,
+    )
+    feature2.markdown(
+        '<div class="feature-card"><strong>Smart insights</strong>'
+        '<p>Understand your spending and recent account activity quickly.</p></div>',
+        unsafe_allow_html=True,
+    )
+    feature3.markdown(
+        '<div class="feature-card"><strong>Everyday convenience</strong>'
+        '<p>Transfer, pay bills, manage your card and deposit in one portal.</p></div>',
+        unsafe_allow_html=True,
+    )
 
     overview_tab, insights_tab = st.tabs(["Recent activity", "Spending insights"])
     with overview_tab:
@@ -916,9 +979,9 @@ def main_app() -> None:
         st.rerun()
     st.session_state.last_activity = time.time()
 
-    # Apply Quick Action navigation before creating the sidebar widget
+    # Apply a Quick Action navigation request before the sidebar radio widget
+    # is instantiated. This avoids StreamlitWidgetAlreadyInstantiatedError.
     requested_page = st.session_state.pop("requested_page", None)
-
     if requested_page:
         st.session_state.navigation = requested_page
 
