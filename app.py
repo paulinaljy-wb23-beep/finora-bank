@@ -26,6 +26,7 @@ from typing import Any
 
 import pandas as pd
 import streamlit as st
+import streamlit.components.v1 as components
 
 
 # -----------------------------------------------------------------------------
@@ -38,6 +39,8 @@ OTP_VALID_SECONDS = 60
 SESSION_TIMEOUT_SECONDS = 5 * 60
 ACCOUNT_LOCK_SECONDS = 60
 MAX_LOGIN_ATTEMPTS = 3
+ACCOUNT_NUMBER_LENGTH = 10
+DATA_SCHEMA_VERSION = 2
 
 DEEP_BLUE = "#123B6D"
 SKY_BLUE = "#6EC1E4"
@@ -142,14 +145,14 @@ def create_seed_data() -> dict[str, Any]:
         },
     ]
     return {
-        "schema_version": 1,
+        "schema_version": DATA_SCHEMA_VERSION,
         "users": {
             "paulina": {
                 "full_name": "Paulina",
                 "account_number": "8800251573",
                 "password": hash_password("Finora@123"),
                 "balance": 15420.80,
-                "credit_card": {"number": "**** 4821", "limit": 10000.0, "outstanding": 1580.0},
+                "credit_card": {"number": "**** 4821", "limit": 10000.0, "outstanding": 2000.0},
                 "failed_attempts": 0,
                 "locked_until": 0.0,
                 "transactions": paulina_transactions,
@@ -205,11 +208,22 @@ def load_data() -> dict[str, Any]:
             if not isinstance(data.get("users"), dict):
                 raise ValueError("Missing users collection")
 
-            # Migrate data created by the earlier demonstration version so
-            # existing balances and transaction records are not lost.
+            # Migrate data created by earlier demonstration versions without
+            # deleting existing balances or transaction records.
+            data_changed = False
             if "chai" in data["users"] and "paulina" not in data["users"]:
                 data["users"]["paulina"] = data["users"].pop("chai")
                 data["users"]["paulina"]["full_name"] = "Paulina"
+                data_changed = True
+
+            if int(data.get("schema_version", 1)) < DATA_SCHEMA_VERSION:
+                paulina = data["users"].get("paulina")
+                if paulina:
+                    paulina["credit_card"]["outstanding"] = 2000.0
+                data["schema_version"] = DATA_SCHEMA_VERSION
+                data_changed = True
+
+            if data_changed:
                 save_data(data)
             return data
         except (OSError, json.JSONDecodeError, ValueError) as exc:
@@ -224,6 +238,12 @@ def find_username_by_account(data: dict[str, Any], account_number: str) -> str |
         if user["account_number"] == account_number.strip():
             return username
     return None
+
+
+def valid_account_number(account_number: str) -> bool:
+    """Return True only for an account number containing exactly 10 digits."""
+    cleaned = account_number.strip()
+    return cleaned.isdigit() and len(cleaned) == ACCOUNT_NUMBER_LENGTH
 
 
 # -----------------------------------------------------------------------------
@@ -332,24 +352,35 @@ def process_transaction(username: str, pending: dict[str, Any]) -> dict[str, Any
         ref = f"FNB-{datetime.now():%Y%m%d}-{uuid.uuid4().hex[:8].upper()}"
 
         if kind == "Transfer":
-            recipient_username = find_username_by_account(data, details["recipient_account"])
-            if recipient_username is None:
-                raise BankingError("Recipient account number was not found.")
+            recipient_account = str(details["recipient_account"]).strip()
+            if not valid_account_number(recipient_account):
+                raise BankingError("Recipient account number must contain exactly 10 digits.")
+            recipient_username = find_username_by_account(data, recipient_account)
             if recipient_username == username:
                 raise BankingError("You cannot transfer money to the same account.")
             if user["balance"] < amount:
                 raise BankingError("Insufficient balance for this transfer.")
 
-            recipient = data["users"][recipient_username]
             user["balance"] = round(user["balance"] - amount, 2)
-            recipient["balance"] = round(recipient["balance"] + amount, 2)
             note = str(details.get("note", "")).strip()
             note_suffix = f" - {note}" if note else ""
+
+            if recipient_username:
+                recipient = data["users"][recipient_username]
+                recipient["balance"] = round(recipient["balance"] + amount, 2)
+                recipient_label = recipient["full_name"]
+                add_transaction(
+                    recipient,
+                    "Transfer Received",
+                    f"Transfer from {user['full_name']}{note_suffix}",
+                    amount,
+                    ref,
+                )
+            else:
+                recipient_label = f"external account •••• {recipient_account[-4:]}"
+
             add_transaction(
-                user, "Transfer", f"Transfer to {recipient['full_name']}{note_suffix}", -amount, ref
-            )
-            add_transaction(
-                recipient, "Transfer Received", f"Transfer from {user['full_name']}{note_suffix}", amount, ref
+                user, "Transfer", f"Transfer to {recipient_label}{note_suffix}", -amount, ref
             )
 
         elif kind == "Bill Payment":
@@ -392,6 +423,7 @@ def create_pending_transaction(kind: str, details: dict[str, Any], summary: str)
     """Generate a one-use OTP and store only its hash for verification."""
     otp = f"{secrets.randbelow(1_000_000):06d}"
     st.session_state.pending_transaction = {
+        "otp_id": uuid.uuid4().hex[:10],
         "kind": kind,
         "details": details,
         "summary": summary,
@@ -592,6 +624,7 @@ def sign_out(message: str | None = None) -> None:
     for key in [
         "authenticated", "username", "last_activity", "pending_transaction",
         "demo_otp", "transaction_result", "navigation", "requested_page",
+        "account_visible",
     ]:
         st.session_state.pop(key, None)
     if message:
@@ -661,8 +694,18 @@ def sidebar(user: dict[str, Any]) -> str:
         st.markdown("## FINORA BANK")
         st.caption("SECURE • SIMPLE • SMART")
         st.markdown(f"**{html.escape(user['full_name'])}**")
-        st.caption(f"Savings •••• {user['account_number'][-4:]}")
-        st.markdown(f"### {money(user['balance'])}")
+        account_visible = bool(st.session_state.get("account_visible", False))
+        if account_visible:
+            st.caption(f"Savings {user['account_number']}")
+            st.markdown(f"### {money(user['balance'])}")
+        else:
+            st.caption(f"Savings •••• {user['account_number'][-4:]}")
+            st.markdown("### RM ••••••")
+
+        visibility_label = "🙈 Hide account details" if account_visible else "👁 Show account details"
+        if st.button(visibility_label, key="account_visibility_toggle", use_container_width=True):
+            st.session_state.account_visible = not account_visible
+            st.rerun()
         st.divider()
         pages = [
             "Dashboard", "Transfer", "Pay Bills", "Credit Card",
@@ -791,6 +834,45 @@ def dashboard_page(user: dict[str, Any]) -> None:
                 st.info("Complete a transaction to view the balance trend.")
 
 
+def otp_countdown(expires_at: float, otp_id: str) -> None:
+    """Render a live browser-side OTP countdown without blocking Streamlit."""
+    deadline_ms = int(expires_at * 1000)
+    timer_id = f"otp-timer-{otp_id}"
+    components.html(
+        f"""
+        <div style="font-family:Arial,sans-serif;padding:2px 1px 0;color:#123B6D;">
+          <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;">
+            <strong>OTP expires in</strong>
+            <strong id="{timer_id}-text" style="font-size:20px;color:#123B6D;">60 seconds</strong>
+          </div>
+          <div style="height:10px;background:#DDEEF5;border-radius:999px;overflow:hidden;">
+            <div id="{timer_id}-bar" style="height:100%;width:100%;background:#6EC1E4;
+                 border-radius:999px;transition:width 1s linear,background .3s;"></div>
+          </div>
+        </div>
+        <script>
+          const deadline = {deadline_ms};
+          const textElement = document.getElementById("{timer_id}-text");
+          const barElement = document.getElementById("{timer_id}-bar");
+          function updateTimer() {{
+            const seconds = Math.max(0, Math.ceil((deadline - Date.now()) / 1000));
+            textElement.textContent = seconds > 0 ? seconds + " seconds" : "Expired";
+            barElement.style.width = Math.min(100, (seconds / {OTP_VALID_SECONDS}) * 100) + "%";
+            if (seconds <= 10) {{
+              textElement.style.color = "#D64545";
+              barElement.style.background = "#D64545";
+            }}
+            if (seconds <= 0) clearInterval(timerInterval);
+          }}
+          let timerInterval;
+          updateTimer();
+          timerInterval = setInterval(updateTimer, 1000);
+        </script>
+        """,
+        height=68,
+    )
+
+
 def otp_panel() -> None:
     """Display and verify the OTP for the active pending transaction."""
     pending = st.session_state.get("pending_transaction")
@@ -801,10 +883,9 @@ def otp_panel() -> None:
     st.subheader("Secure verification")
     st.write(pending["summary"])
     remaining = max(0, int(pending["expires_at"] - time.time()))
+    otp_countdown(pending["expires_at"], pending.get("otp_id", "current"))
     if remaining == 0:
         st.error("This OTP has expired. Generate a new OTP to continue.")
-    else:
-        st.info(f"The OTP is valid for approximately {remaining} more seconds.")
 
     with st.expander("View demonstration OTP", expanded=True):
         st.code(st.session_state.get("demo_otp", "------"), language=None)
@@ -881,17 +962,21 @@ def transfer_page(user: dict[str, Any]) -> None:
         submitted = st.form_submit_button("Continue to OTP", type="primary")
     if submitted:
         try:
+            if not valid_account_number(recipient_account):
+                raise BankingError("Recipient account number must contain exactly 10 digits.")
             data = load_data()
             recipient_username = find_username_by_account(data, recipient_account)
-            if recipient_username is None:
-                raise BankingError("Recipient account number was not found.")
             if recipient_username == st.session_state.username:
                 raise BankingError("You cannot transfer money to your own account.")
             if amount <= 0:
                 raise BankingError("Transfer amount must be greater than RM 0.00.")
             if amount > user["balance"]:
                 raise BankingError("Insufficient balance for this transfer.")
-            recipient_name = data["users"][recipient_username]["full_name"]
+            recipient_name = (
+                data["users"][recipient_username]["full_name"]
+                if recipient_username
+                else f"external account •••• {recipient_account[-4:]}"
+            )
             details = {
                 "recipient_account": recipient_account.strip(),
                 "amount": amount,
@@ -903,16 +988,25 @@ def transfer_page(user: dict[str, Any]) -> None:
         except (BankingError, DataStoreError) as exc:
             st.error(str(exc))
     otp_panel()
-    st.caption("Demo recipient: Alex Tan • Account 8800259999")
+    st.caption("Enter exactly 10 digits. Demo Finora recipient: Alex Tan • 8800259999")
 
 
 def bills_page(user: dict[str, Any]) -> None:
     """Provide service selection and a validated bill-payment workflow."""
     page_title("Pay Bills", "Pay utilities and services from your savings account.")
     show_transaction_result()
+    category = st.selectbox(
+        "Bill category",
+        list(BILLERS),
+        key="bill_category",
+        help="The provider list updates automatically when this category changes.",
+    )
     with st.form("bill_form"):
-        category = st.selectbox("Bill category", list(BILLERS))
-        provider = st.selectbox("Service provider", BILLERS[category])
+        provider = st.selectbox(
+            "Service provider",
+            BILLERS[category],
+            key=f"bill_provider_{category}",
+        )
         customer_reference = st.text_input("Bill account / reference number", max_chars=30)
         amount = st.number_input("Payment amount (RM)", min_value=0.0, step=10.0, format="%.2f")
         submitted = st.form_submit_button("Continue to OTP", type="primary")
