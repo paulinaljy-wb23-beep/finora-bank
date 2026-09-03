@@ -272,6 +272,49 @@ def add_transaction(user: dict[str, Any], kind: str, description: str, amount: f
     )
 
 
+def balance_history_frame(transactions: list[dict[str, Any]]) -> pd.DataFrame:
+    """Return chronological balance data suitable for a Streamlit line chart."""
+    if not transactions:
+        return pd.DataFrame(columns=["Date", "Balance (RM)"])
+
+    history = pd.DataFrame(transactions)
+    history["Date"] = pd.to_datetime(history["date"], errors="coerce")
+    history["Balance (RM)"] = pd.to_numeric(history["balance_after"], errors="coerce")
+    return (
+        history.dropna(subset=["Date", "Balance (RM)"])
+        .sort_values("Date")[["Date", "Balance (RM)"]]
+        .set_index("Date")
+    )
+
+
+def spending_summary(transactions: list[dict[str, Any]]) -> pd.DataFrame:
+    """Summarise outgoing transactions by category for analytics."""
+    outgoing = [item for item in transactions if float(item.get("amount", 0)) < 0]
+    if not outgoing:
+        return pd.DataFrame(columns=["Category", "Spending (RM)"])
+
+    spending = pd.DataFrame(outgoing)
+    spending["Spending (RM)"] = pd.to_numeric(spending["amount"], errors="coerce").abs()
+    return (
+        spending.groupby("type", as_index=False)["Spending (RM)"]
+        .sum()
+        .rename(columns={"type": "Category"})
+        .sort_values("Spending (RM)", ascending=False)
+    )
+
+
+def transactions_csv(transactions: list[dict[str, Any]]) -> bytes:
+    """Create a consistently formatted UTF-8 CSV statement."""
+    output = io.StringIO()
+    writer = csv.DictWriter(
+        output, fieldnames=["date", "id", "type", "description", "amount", "balance_after"]
+    )
+    writer.writeheader()
+    writer.writerows(transactions)
+    # UTF-8 BOM helps Microsoft Excel display the file correctly.
+    return output.getvalue().encode("utf-8-sig")
+
+
 def process_transaction(username: str, pending: dict[str, Any]) -> dict[str, Any]:
     """Validate and commit one OTP-approved transaction to the JSON file."""
     with DATA_LOCK:
@@ -300,14 +343,21 @@ def process_transaction(username: str, pending: dict[str, Any]) -> dict[str, Any
             recipient = data["users"][recipient_username]
             user["balance"] = round(user["balance"] - amount, 2)
             recipient["balance"] = round(recipient["balance"] + amount, 2)
-            add_transaction(user, "Transfer", f"Transfer to {recipient['full_name']}", -amount, ref)
-            add_transaction(recipient, "Transfer Received", f"Transfer from {user['full_name']}", amount, ref)
+            note = str(details.get("note", "")).strip()
+            note_suffix = f" - {note}" if note else ""
+            add_transaction(
+                user, "Transfer", f"Transfer to {recipient['full_name']}{note_suffix}", -amount, ref
+            )
+            add_transaction(
+                recipient, "Transfer Received", f"Transfer from {user['full_name']}{note_suffix}", amount, ref
+            )
 
         elif kind == "Bill Payment":
             if user["balance"] < amount:
                 raise BankingError("Insufficient balance for this bill payment.")
             user["balance"] = round(user["balance"] - amount, 2)
-            description = f"{details['provider']} - {details['customer_reference']}"
+            category = details.get("category", "Bill")
+            description = f"{category}: {details['provider']} - {details['customer_reference']}"
             add_transaction(user, "Bill Payment", description, -amount, ref)
 
         elif kind == "Credit Card Payment":
@@ -394,6 +444,25 @@ def inject_css() -> None:
             padding: .60rem .70rem; border-radius: 10px; margin: .12rem 0;
         }}
         [data-testid="stSidebar"] [role="radiogroup"] label:hover {{ background: rgba(110,193,228,.18); }}
+        [data-testid="stSidebar"] div.stButton > button {{
+            width:100%; color:#FFFFFF !important;
+            background:rgba(255,255,255,.06) !important;
+            border:1px solid {SKY_BLUE} !important;
+            box-shadow:none !important;
+        }}
+        [data-testid="stSidebar"] div.stButton > button:hover {{
+            color:#FFFFFF !important;
+            background:rgba(110,193,228,.20) !important;
+            border-color:#FFFFFF !important;
+        }}
+        [data-testid="stSidebar"] div.stButton > button:focus,
+        [data-testid="stSidebar"] div.stButton > button:active {{
+            color:#FFFFFF !important;
+            background:rgba(110,193,228,.28) !important;
+            border-color:{MINT_GREEN} !important;
+            box-shadow:0 0 0 2px rgba(143,217,199,.22) !important;
+        }}
+        [data-testid="stSidebar"] div.stButton > button p {{ color:#FFFFFF !important; }}
         .block-container {{ max-width: 1180px; padding-top: 4.5rem; padding-bottom: 3rem; }}
         h1, h2, h3 {{ color: {DEEP_BLUE}; letter-spacing: -.02em; }}
         .brand-row {{ display:flex; align-items:center; gap:.75rem; margin-bottom:1.1rem; }}
@@ -423,7 +492,7 @@ def inject_css() -> None:
         .hero h2 {{ color:white; margin:0 0 .2rem 0; }}
         .hero p {{ color:#DDF6FF; margin:0; }}
         .dashboard-hero {{
-            min-height:260px; border-radius:22px; padding:2.2rem 2.35rem;
+            min-height:330px; border-radius:22px; padding:2rem 2.2rem 1.45rem;
             display:flex; flex-direction:column; justify-content:center;
             color:white; margin-bottom:1.15rem; overflow:hidden;
             background-size:cover; background-position:center;
@@ -435,13 +504,18 @@ def inject_css() -> None:
         }}
         .dashboard-hero h2 {{ color:white; font-size:2.15rem; max-width:480px; margin:0 0 .65rem 0; }}
         .dashboard-hero p {{ color:#E3F7FF; max-width:455px; font-size:1rem; margin:0; line-height:1.55; }}
-        .feature-card {{
-            min-height:115px; padding:1rem 1.05rem; border-radius:15px;
-            background:rgba(255,255,255,.88); border:1px solid #D6ECF5;
-            box-shadow:0 8px 24px #123B6D12; margin:.35rem 0 1rem 0;
+        .hero-features {{
+            display:grid; grid-template-columns:repeat(3, 1fr); gap:.65rem;
+            max-width:760px; margin-top:1.35rem;
         }}
-        .feature-card strong {{ color:{DEEP_BLUE}; font-size:1rem; }}
-        .feature-card p {{ color:#607B8C; font-size:.86rem; margin:.42rem 0 0 0; line-height:1.45; }}
+        .hero-feature {{
+            min-height:72px; padding:.70rem .78rem; border-radius:12px;
+            background:rgba(5,39,82,.66); border:1px solid rgba(174,231,244,.42);
+            backdrop-filter:blur(7px); -webkit-backdrop-filter:blur(7px);
+            box-shadow:0 8px 22px rgba(2,25,58,.20);
+        }}
+        .hero-feature strong {{ display:block; color:#FFFFFF; font-size:.82rem; margin-bottom:.26rem; }}
+        .hero-feature span {{ display:block; color:#D9F4FB; font-size:.70rem; line-height:1.35; }}
         div[data-testid="stMetric"] {{
             background:rgba(255,255,255,.96); border:1px solid #D8EDF6; border-radius:16px;
             padding:1rem 1.05rem; box-shadow:0 8px 24px #123B6D12;
@@ -468,6 +542,11 @@ def inject_css() -> None:
         }}
         .muted {{ color:#607B8C; }}
         .footer {{ text-align:center; color:#7790A0; font-size:.78rem; margin-top:2.5rem; }}
+        @media (max-width: 760px) {{
+            .dashboard-hero {{ min-height:auto; padding:1.45rem; background-position:62% center; }}
+            .hero-features {{ grid-template-columns:1fr; max-width:330px; }}
+            .hero-feature {{ min-height:auto; }}
+        }}
         </style>
         """,
         unsafe_allow_html=True,
@@ -623,6 +702,14 @@ def dashboard_page(user: dict[str, Any]) -> None:
               <h2>Welcome back, {first_name}.</h2>
               <p>Manage your money confidently with secure payments, clear insights
               and everyday banking in one place.</p>
+              <div class="hero-features">
+                <div class="hero-feature"><strong>Secure by design</strong>
+                  <span>Password hashing, account lock and OTP.</span></div>
+                <div class="hero-feature"><strong>Smart insights</strong>
+                  <span>Track spending and balance trends.</span></div>
+                <div class="hero-feature"><strong>Everyday convenience</strong>
+                  <span>Transfer, pay and deposit securely.</span></div>
+              </div>
             </div>
             """,
             unsafe_allow_html=True,
@@ -657,24 +744,7 @@ def dashboard_page(user: dict[str, Any]) -> None:
     if q4.button("Make deposit", use_container_width=True):
         change_page("Deposit")
 
-    feature1, feature2, feature3 = st.columns(3)
-    feature1.markdown(
-        '<div class="feature-card"><strong>Secure by design</strong>'
-        '<p>Password hashing, account protection and OTP verification.</p></div>',
-        unsafe_allow_html=True,
-    )
-    feature2.markdown(
-        '<div class="feature-card"><strong>Smart insights</strong>'
-        '<p>Understand your spending and recent account activity quickly.</p></div>',
-        unsafe_allow_html=True,
-    )
-    feature3.markdown(
-        '<div class="feature-card"><strong>Everyday convenience</strong>'
-        '<p>Transfer, pay bills, manage your card and deposit in one portal.</p></div>',
-        unsafe_allow_html=True,
-    )
-
-    overview_tab, insights_tab = st.tabs(["Recent activity", "Spending insights"])
+    overview_tab, insights_tab = st.tabs(["Recent activity", "Financial analytics"])
     with overview_tab:
         if transactions:
             recent = pd.DataFrame(list(reversed(transactions[-5:])))
@@ -691,14 +761,34 @@ def dashboard_page(user: dict[str, Any]) -> None:
             st.info("No transactions have been recorded yet.")
 
     with insights_tab:
-        if outgoing:
-            spending = pd.DataFrame(outgoing)
-            spending["Spending (RM)"] = spending["amount"].abs()
-            category = spending.groupby("type", as_index=True)["Spending (RM)"].sum()
-            st.bar_chart(category, color=SKY_BLUE)
-            st.caption("Total outgoing amount grouped by transaction type.")
-        else:
-            st.info("Complete an outgoing transaction to view spending insights.")
+        chart1, chart2 = st.columns(2)
+        with chart1:
+            st.markdown("#### Spending by category")
+            category = spending_summary(transactions)
+            if not category.empty:
+                st.bar_chart(
+                    category.set_index("Category"),
+                    y="Spending (RM)",
+                    color=SKY_BLUE,
+                    use_container_width=True,
+                )
+                st.caption("Total outgoing amount grouped by transaction type.")
+            else:
+                st.info("Complete an outgoing transaction to view spending insights.")
+
+        with chart2:
+            st.markdown("#### Balance over time")
+            history = balance_history_frame(transactions)
+            if not history.empty:
+                st.line_chart(
+                    history,
+                    y="Balance (RM)",
+                    color=DEEP_BLUE,
+                    use_container_width=True,
+                )
+                st.caption("Available balance recorded after each transaction.")
+            else:
+                st.info("Complete a transaction to view the balance trend.")
 
 
 def otp_panel() -> None:
@@ -835,6 +925,7 @@ def bills_page(user: dict[str, Any]) -> None:
             st.error("Insufficient balance for this bill payment.")
         else:
             details = {
+                "category": category,
                 "provider": provider,
                 "customer_reference": customer_reference.strip(),
                 "amount": amount,
@@ -933,15 +1024,9 @@ def transactions_page(user: dict[str, Any]) -> None:
             use_container_width=True,
         )
 
-    output = io.StringIO()
-    writer = csv.DictWriter(
-        output, fieldnames=["date", "id", "type", "description", "amount", "balance_after"]
-    )
-    writer.writeheader()
-    writer.writerows(filtered)
     st.download_button(
         "Download filtered statement (CSV)",
-        data=output.getvalue().encode("utf-8"),
+        data=transactions_csv(filtered),
         file_name=f"finora_statement_{datetime.now():%Y%m%d}.csv",
         mime="text/csv",
         use_container_width=True,
@@ -958,15 +1043,23 @@ def security_page(user: dict[str, Any]) -> None:
     c1.metric("Password", "PBKDF2-SHA256")
     c2.metric("OTP validity", f"{OTP_VALID_SECONDS} seconds")
     c3.metric("Session timeout", f"{SESSION_TIMEOUT_SECONDS // 60} minutes")
-    st.markdown(
-        """
-        - Passwords are stored as salted hashes, not readable plain text.
-        - Three failed sign-in attempts temporarily lock the account.
-        - Every banking transaction requires a new six-digit OTP.
-        - OTPs expire and are cancelled after three incorrect entries.
-        - Account data and transaction history persist in a local JSON file.
-        - An inactive authenticated session is automatically signed out.
-        """
+    st.subheader("Implemented enhancements")
+    enhancements = pd.DataFrame(
+        [
+            ("Persistent data storage", "Active", "Balances and transactions saved to JSON"),
+            ("Password hashing", "Active", "Salted PBKDF2-SHA256; no plain-text password"),
+            ("Balance visualisation", "Active", "Balance trend and spending category charts"),
+            ("Account lock", "Active", "60-second lock after 3 failed login attempts"),
+            ("Session timeout", "Active", "Automatic sign-out after 5 minutes of inactivity"),
+            ("Improved OTP", "Active", "Random 6-digit code, 60-second expiry, 3 attempts"),
+            ("CSV report export", "Active", "Filtered transaction statement download"),
+        ],
+        columns=["Enhancement", "Status", "Implementation"],
+    )
+    st.dataframe(enhancements, hide_index=True, use_container_width=True)
+    st.progress(
+        min(1.0, max(0.0, remaining / SESSION_TIMEOUT_SECONDS)),
+        text="Session time remaining",
     )
     st.caption(f"Approximate session time remaining at page load: {remaining // 60}m {remaining % 60}s")
 
