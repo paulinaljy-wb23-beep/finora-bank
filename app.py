@@ -398,6 +398,16 @@ def inject_css() -> None:
         }}
         .brand-name {{ font-size:1.35rem; line-height:1; font-weight:800; color:{DEEP_BLUE}; }}
         .brand-sub {{ color:#4D7890; font-size:.76rem; letter-spacing:.12em; margin-top:.28rem; }}
+        .brand-logo-login {{
+            display:flex; justify-content:center; align-items:center;
+            width:100%; max-width:390px; margin:1.35rem auto .90rem auto;
+        }}
+        .brand-logo-login img {{ display:block; width:100%; height:auto; object-fit:contain; }}
+        .brand-logo-compact {{
+            display:flex; justify-content:flex-start; align-items:center;
+            width:100%; max-width:190px; margin:0 0 1rem 0;
+        }}
+        .brand-logo-compact img {{ display:block; width:100%; height:auto; object-fit:contain; }}
         .hero {{
             border-radius:20px; padding:1.45rem 1.55rem; color:white; margin-bottom:1rem;
             background:radial-gradient(circle at 85% 0%, #69D7EE 0%, transparent 30%),
@@ -442,7 +452,12 @@ def brand_header(compact: bool = False) -> None:
     """Render the uploaded logo, with a text fallback if the file is absent."""
     logo_path = APP_DIR / "assets" / "finora_logo.png"
     if logo_path.exists():
-        st.image(str(logo_path), width=185 if compact else 240)
+        logo_uri = image_data_uri(logo_path)
+        logo_class = "brand-logo-compact" if compact else "brand-logo-login"
+        st.markdown(
+            f'<div class="{logo_class}"><img src="{logo_uri}" alt="Finora Bank"></div>',
+            unsafe_allow_html=True,
+        )
         return
 
     st.markdown(
