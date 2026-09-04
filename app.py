@@ -501,16 +501,8 @@ def inject_css() -> None:
     inside_background = image_data_uri(APP_DIR / "assets" / "finora_dashboard_background.png")
     if st.session_state.get("authenticated") and inside_background:
         page_background = (
-            "radial-gradient(circle at 88% 12%, rgba(35, 155, 205, .34) 0%, "
-            "rgba(35, 155, 205, .10) 18%, transparent 36%), "
-            "radial-gradient(circle at 10% 88%, rgba(72, 187, 160, .28) 0%, "
-            "rgba(72, 187, 160, .08) 18%, transparent 34%), "
-            "repeating-linear-gradient(135deg, rgba(255, 255, 255, .08) 0 1px, "
-            "transparent 1px 38px), "
-            "linear-gradient(135deg, rgba(174, 215, 234, .78) 0%, "
-            "rgba(202, 230, 239, .80) 52%, rgba(177, 221, 218, .76) 100%), "
-            f"url('{inside_background}') center center / cover fixed no-repeat"
-        )
+        f"url('{inside_background}') center center / cover fixed no-repeat"
+    )
     elif login_background:
         page_background = (
             "linear-gradient(rgba(5, 28, 65, .18), rgba(5, 45, 88, .30)), "
