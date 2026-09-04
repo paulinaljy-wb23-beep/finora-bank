@@ -501,8 +501,14 @@ def inject_css() -> None:
     inside_background = image_data_uri(APP_DIR / "assets" / "finora_dashboard_background.png")
     if st.session_state.get("authenticated") and inside_background:
         page_background = (
-            "linear-gradient(135deg, rgba(174, 215, 234, .76) 0%, "
-            "rgba(202, 230, 239, .78) 52%, rgba(177, 221, 218, .74) 100%), "
+            "radial-gradient(circle at 88% 12%, rgba(35, 155, 205, .34) 0%, "
+            "rgba(35, 155, 205, .10) 18%, transparent 36%), "
+            "radial-gradient(circle at 10% 88%, rgba(72, 187, 160, .28) 0%, "
+            "rgba(72, 187, 160, .08) 18%, transparent 34%), "
+            "repeating-linear-gradient(135deg, rgba(255, 255, 255, .08) 0 1px, "
+            "transparent 1px 38px), "
+            "linear-gradient(135deg, rgba(174, 215, 234, .78) 0%, "
+            "rgba(202, 230, 239, .80) 52%, rgba(177, 221, 218, .76) 100%), "
             f"url('{inside_background}') center center / cover fixed no-repeat"
         )
     elif login_background:
@@ -965,6 +971,57 @@ def otp_countdown(expires_at: float, otp_id: str) -> None:
     )
 
 
+def session_countdown(expires_at: float) -> None:
+    """Render the current session timeout as a live browser-side countdown."""
+    deadline_ms = int(expires_at * 1000)
+    components.html(
+        f"""
+        <div style="font-family:Arial,sans-serif;padding:2px 1px 0;color:#123B6D;">
+          <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;">
+            <strong>Session time remaining</strong>
+            <strong id="session-timer-text" style="font-size:20px;color:#123B6D;">5:00</strong>
+          </div>
+          <div style="height:10px;background:#DDEEF5;border-radius:999px;overflow:hidden;">
+            <div id="session-timer-bar" style="height:100%;width:100%;
+                 background:linear-gradient(90deg,#123B6D,#6EC1E4,#8FD9C7);
+                 border-radius:999px;transition:width 1s linear,background .3s;"></div>
+          </div>
+          <div id="session-timer-note" style="font-size:12px;color:#58778F;margin-top:7px;">
+            The timer restarts when you interact with the banking app.
+          </div>
+        </div>
+        <script>
+          const sessionDeadline = {deadline_ms};
+          const sessionTotal = {SESSION_TIMEOUT_SECONDS};
+          const sessionText = document.getElementById("session-timer-text");
+          const sessionBar = document.getElementById("session-timer-bar");
+          const sessionNote = document.getElementById("session-timer-note");
+          function updateSessionTimer() {{
+            const seconds = Math.max(0, Math.ceil((sessionDeadline - Date.now()) / 1000));
+            const minutes = Math.floor(seconds / 60);
+            const remainder = String(seconds % 60).padStart(2, "0");
+            sessionText.textContent = minutes + ":" + remainder;
+            sessionBar.style.width = Math.min(100, (seconds / sessionTotal) * 100) + "%";
+            if (seconds <= 60) {{
+              sessionText.style.color = "#D64545";
+              sessionBar.style.background = "#D64545";
+              sessionNote.textContent = "Your session will expire soon.";
+            }}
+            if (seconds <= 0) {{
+              sessionText.textContent = "Expired";
+              sessionNote.textContent = "Interact with the app to complete automatic sign-out.";
+              clearInterval(sessionTimerInterval);
+            }}
+          }}
+          let sessionTimerInterval;
+          updateSessionTimer();
+          sessionTimerInterval = setInterval(updateSessionTimer, 1000);
+        </script>
+        """,
+        height=82,
+    )
+
+
 def otp_panel() -> None:
     """Display and verify the OTP for the active pending transaction."""
     pending = st.session_state.get("pending_transaction")
@@ -1264,8 +1321,6 @@ def transactions_page(user: dict[str, Any]) -> None:
 def security_page(user: dict[str, Any]) -> None:
     """Explain the demonstrable security controls and current session state."""
     page_title("Security Centre", "Review the protection features used by this simulation.")
-    elapsed = time.time() - st.session_state.last_activity
-    remaining = max(0, int(SESSION_TIMEOUT_SECONDS - elapsed))
     st.success("Your account session is active.")
     c1, c2, c3 = st.columns(3)
     c1.metric("Password", "PBKDF2-SHA256")
@@ -1285,11 +1340,16 @@ def security_page(user: dict[str, Any]) -> None:
         columns=["Enhancement", "Status", "Implementation"],
     )
     st.dataframe(enhancements, hide_index=True, use_container_width=True)
-    st.progress(
-        min(1.0, max(0.0, remaining / SESSION_TIMEOUT_SECONDS)),
-        text="Session time remaining",
-    )
-    st.caption(f"Approximate session time remaining at page load: {remaining // 60}m {remaining % 60}s")
+    st.subheader("Live security countdowns")
+    session_countdown(st.session_state.last_activity + SESSION_TIMEOUT_SECONDS)
+
+    pending = st.session_state.get("pending_transaction")
+    if pending:
+        st.markdown("##### Active OTP")
+        otp_countdown(pending["expires_at"], pending.get("otp_id", "security-centre"))
+        st.caption("Return to the transaction page to enter or regenerate the OTP.")
+    else:
+        st.info("No active OTP. Start a transfer, bill, card or deposit transaction to generate one.")
 
 
 def main_app() -> None:
