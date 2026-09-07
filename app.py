@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import csv
 import base64
+import calendar
 import hashlib
 import hmac
 import html
@@ -41,7 +42,7 @@ SESSION_TIMEOUT_SECONDS = 5 * 60
 ACCOUNT_LOCK_SECONDS = 60
 MAX_LOGIN_ATTEMPTS = 3
 ACCOUNT_NUMBER_LENGTH = 10
-DATA_SCHEMA_VERSION = 3
+DATA_SCHEMA_VERSION = 4
 DEMO_CARD_NUMBER = "5212345678904821"
 
 DEEP_BLUE = "#123B6D"
@@ -64,6 +65,7 @@ NAVIGATION_LABELS = {
     "Pay Bills": "🧾  Pay Bills",
     "Credit Card": "💳  Credit Card",
     "Deposit": "➕  Deposit",
+    "Budget Planner": "📊  Budget Planner",
     "Transactions": "📄  Transactions",
     "Security": "🛡️  Security",
 }
@@ -173,6 +175,8 @@ def create_seed_data() -> dict[str, Any]:
                 "credit_card": {"number": DEMO_CARD_NUMBER, "limit": 10000.0, "outstanding": 2000.0},
                 "failed_attempts": 0,
                 "locked_until": 0.0,
+                "monthly_budget": 3000.0,
+                "security_log": [],
                 "transactions": paulina_transactions,
             },
             "alex": {
@@ -183,6 +187,8 @@ def create_seed_data() -> dict[str, Any]:
                 "credit_card": {"number": "5412098765431109", "limit": 6000.0, "outstanding": 780.0},
                 "failed_attempts": 0,
                 "locked_until": 0.0,
+                "monthly_budget": 2000.0,
+                "security_log": [],
                 "transactions": [
                     {
                         "id": "FNB-20260820-OPEN02",
@@ -248,6 +254,17 @@ def load_data() -> dict[str, Any]:
                 if alex:
                     alex["credit_card"]["number"] = "5412098765431109"
 
+            # Schema 4 adds a personal monthly budget and a persistent
+            # security audit trail. setdefault also repairs older save files
+            # that do not contain one of these fields.
+            for user in data["users"].values():
+                if "monthly_budget" not in user:
+                    user["monthly_budget"] = 3000.0
+                    data_changed = True
+                if "security_log" not in user:
+                    user["security_log"] = []
+                    data_changed = True
+
             if current_schema < DATA_SCHEMA_VERSION:
                 data["schema_version"] = DATA_SCHEMA_VERSION
                 data_changed = True
@@ -305,6 +322,8 @@ def authenticate(username: str, password: str) -> tuple[str, str]:
         current_time = time.time()
         if float(user.get("locked_until", 0)) > current_time:
             remaining = int(user["locked_until"] - current_time) + 1
+            add_security_event(user, "Login attempt", "Blocked", "Account is temporarily locked")
+            save_data(data)
             return "locked", f"Account locked. Try again in {remaining} seconds."
 
         # The lockout time is over, so reset the failed-attempt counter.
@@ -315,6 +334,7 @@ def authenticate(username: str, password: str) -> tuple[str, str]:
         if verify_password(password, user["password"]):
             user["failed_attempts"] = 0
             user["locked_until"] = 0.0
+            add_security_event(user, "Login", "Successful", "Password verified")
             save_data(data)
             return "success", "Login successful."
 
@@ -322,11 +342,42 @@ def authenticate(username: str, password: str) -> tuple[str, str]:
         attempts_left = MAX_LOGIN_ATTEMPTS - user["failed_attempts"]
         if attempts_left <= 0:
             user["locked_until"] = current_time + ACCOUNT_LOCK_SECONDS
+            add_security_event(user, "Account lock", "Blocked", "3 incorrect password attempts")
             save_data(data)
             return "locked", "Account locked for 60 seconds after 3 unsuccessful attempts."
 
+        add_security_event(
+            user,
+            "Login",
+            "Failed",
+            f"Incorrect password; {attempts_left} attempt(s) remaining",
+        )
         save_data(data)
         return "invalid", f"Invalid username or password. {attempts_left} attempt(s) remaining."
+
+
+def security_event_record(event: str, status: str, details: str = "") -> dict[str, str]:
+    """Create one consistently formatted security audit entry."""
+    return {"date": now_text(), "event": event, "status": status, "details": details}
+
+
+def add_security_event(user: dict[str, Any], event: str, status: str, details: str = "") -> None:
+    """Add an event to a user record and retain the latest 100 entries."""
+    log = user.setdefault("security_log", [])
+    log.append(security_event_record(event, status, details))
+    user["security_log"] = log[-100:]
+
+
+def record_security_event(username: str, event: str, status: str, details: str = "") -> None:
+    """Load, append and safely persist a security event for one user."""
+    if not username:
+        return
+    with DATA_LOCK:
+        data = load_data()
+        user = data["users"].get(username.strip().lower())
+        if user:
+            add_security_event(user, event, status, details)
+            save_data(data)
 
 
 def add_transaction(
@@ -384,6 +435,43 @@ def spending_summary(transactions: list[dict[str, Any]]) -> pd.DataFrame:
         .sum()
         .sort_values("Spending (RM)", ascending=False)
     )
+
+
+def current_month_transactions(
+    transactions: list[dict[str, Any]], reference_date: datetime | None = None
+) -> list[dict[str, Any]]:
+    """Return only records from the selected month (the current month by default)."""
+    target = reference_date or datetime.now()
+    selected: list[dict[str, Any]] = []
+    for item in transactions:
+        try:
+            item_date = datetime.strptime(str(item.get("date", "")), "%Y-%m-%d %H:%M:%S")
+        except ValueError:
+            continue
+        if item_date.year == target.year and item_date.month == target.month:
+            selected.append(item)
+    return selected
+
+
+def monthly_spending_summary(
+    transactions: list[dict[str, Any]], reference_date: datetime | None = None
+) -> pd.DataFrame:
+    """Summarise outgoing transactions for one calendar month by category."""
+    return spending_summary(current_month_transactions(transactions, reference_date))
+
+
+def update_monthly_budget(username: str, amount: float) -> None:
+    """Save a user's preferred monthly spending limit."""
+    if amount < 0:
+        raise BankingError("Monthly budget cannot be negative.")
+    with DATA_LOCK:
+        data = load_data()
+        user = data["users"].get(username)
+        if not user:
+            raise BankingError("The logged-in account no longer exists.")
+        user["monthly_budget"] = round(float(amount), 2)
+        add_security_event(user, "Budget updated", "Successful", f"New limit: {money(amount)}")
+        save_data(data)
 
 
 def transactions_csv(transactions: list[dict[str, Any]]) -> bytes:
@@ -511,6 +599,12 @@ def create_pending_transaction(kind: str, details: dict[str, Any], summary: str)
     # A real bank would text this code to the user. Here we just show it
     # on screen instead, since this is only a demo.
     st.session_state.demo_otp = otp
+    record_security_event(
+        st.session_state.get("username", ""),
+        "OTP generated",
+        "Active",
+        f"{kind} verification; expires in {OTP_VALID_SECONDS} seconds",
+    )
 
 
 # Styling and image helpers
@@ -731,6 +825,14 @@ def current_user(data: dict[str, Any]) -> dict[str, Any]:
 
 def sign_out(message: str | None = None) -> None:
     """Log the user out and clear everything tied to their session."""
+    username = st.session_state.get("username", "")
+    if username:
+        try:
+            event_details = "Session timed out" if message == "timeout" else "User signed out"
+            record_security_event(username, "Session ended", "Successful", event_details)
+        except DataStoreError:
+            # Signing out must still work even if the audit file cannot be written.
+            pass
     for key in [
         "authenticated", "username", "last_activity", "pending_transaction",
         "demo_otp", "transaction_result", "navigation", "requested_page",
@@ -849,7 +951,7 @@ def sidebar(user: dict[str, Any]) -> str:
         st.divider()
         pages = [
             "Dashboard", "Transfer", "Pay Bills", "Credit Card",
-            "Deposit", "Transactions", "Security",
+            "Deposit", "Budget Planner", "Transactions", "Security",
         ]
         if st.session_state.get("navigation") not in pages:
             st.session_state.navigation = "Dashboard"
@@ -1111,6 +1213,9 @@ def otp_panel() -> None:
 
     cancel_col, resend_col = st.columns(2)
     if cancel_col.button("Cancel transaction", use_container_width=True):
+        record_security_event(
+            st.session_state.username, "OTP verification", "Cancelled", pending["kind"]
+        )
         st.session_state.pop("pending_transaction", None)
         st.session_state.pop("demo_otp", None)
         st.rerun()
@@ -1120,9 +1225,15 @@ def otp_panel() -> None:
 
     if verify_clicked:
         if not entered_otp.isdigit() or len(entered_otp) != 6:
+            record_security_event(
+                st.session_state.username, "OTP verification", "Failed", "Invalid OTP format"
+            )
             st.error("OTP must contain exactly 6 digits.")
             return
         if time.time() > pending["expires_at"]:
+            record_security_event(
+                st.session_state.username, "OTP verification", "Expired", pending["kind"]
+            )
             st.error("The OTP has expired. Please generate a new OTP.")
             return
 
@@ -1130,16 +1241,34 @@ def otp_panel() -> None:
         if not hmac.compare_digest(entered_hash, pending["otp_hash"]):
             pending["verification_attempts"] += 1
             if pending["verification_attempts"] >= 3:
+                record_security_event(
+                    st.session_state.username,
+                    "OTP verification",
+                    "Blocked",
+                    f"{pending['kind']}; 3 incorrect attempts",
+                )
                 st.session_state.pop("pending_transaction", None)
                 st.session_state.pop("demo_otp", None)
                 st.error("Too many incorrect OTP attempts. The transaction was cancelled.")
             else:
                 attempts = 3 - pending["verification_attempts"]
+                record_security_event(
+                    st.session_state.username,
+                    "OTP verification",
+                    "Failed",
+                    f"{pending['kind']}; {attempts} attempt(s) remaining",
+                )
                 st.error(f"Incorrect OTP. {attempts} attempt(s) remaining.")
             return
 
         try:
             result = process_transaction(st.session_state.username, pending)
+            record_security_event(
+                st.session_state.username,
+                "OTP verification",
+                "Successful",
+                f"{pending['kind']}; reference {result['reference']}",
+            )
             st.session_state.transaction_result = result
             st.session_state.pop("pending_transaction", None)
             st.session_state.pop("demo_otp", None)
@@ -1344,6 +1473,85 @@ def deposit_page(user: dict[str, Any]) -> None:
     otp_panel()
 
 
+def budget_planner_page(user: dict[str, Any]) -> None:
+    """Help the user set and monitor a monthly spending target."""
+    today = datetime.now()
+    month_name = today.strftime("%B %Y")
+    page_title("Monthly Budget Planner", f"Plan and monitor your spending for {month_name}.")
+
+    current_budget = float(user.get("monthly_budget", 3000.0))
+    with st.form("monthly_budget_form"):
+        budget_amount = st.number_input(
+            "Monthly spending budget (RM)",
+            min_value=0.0,
+            value=current_budget,
+            step=100.0,
+            format="%.2f",
+            help="Set RM 0.00 if you do not want a monthly limit.",
+        )
+        save_budget = st.form_submit_button("💾 Save monthly budget", type="primary")
+    if save_budget:
+        try:
+            update_monthly_budget(st.session_state.username, budget_amount)
+            st.session_state.budget_message = f"Budget updated to {money(budget_amount)}."
+            st.rerun()
+        except (BankingError, DataStoreError) as exc:
+            st.error(str(exc))
+
+    message = st.session_state.pop("budget_message", None)
+    if message:
+        st.success(message)
+
+    summary = monthly_spending_summary(user.get("transactions", []), today)
+    spent = float(summary["Spending (RM)"].sum()) if not summary.empty else 0.0
+    remaining = current_budget - spent
+    usage = spent / current_budget if current_budget > 0 else 0.0
+
+    budget_col, spent_col, remaining_col = st.columns(3)
+    budget_col.metric("Monthly budget", money(current_budget))
+    spent_col.metric("Spent this month", money(spent))
+    remaining_col.metric(
+        "Remaining",
+        money(max(remaining, 0.0)),
+        delta=f"{money(abs(remaining))} over" if remaining < 0 else None,
+        delta_color="inverse",
+    )
+
+    if current_budget <= 0:
+        st.info("Set a monthly budget above RM 0.00 to activate progress tracking and alerts.")
+    else:
+        st.progress(min(usage, 1.0), text=f"{usage:.0%} of the monthly budget used")
+        if usage > 1:
+            st.error(f"🚨 Budget exceeded by {money(spent - current_budget)}.")
+        elif usage >= 0.9:
+            st.warning(f"⚠️ You have used {usage:.0%} of this month's budget.")
+        elif usage >= 0.7:
+            st.info(f"🔔 You have used {usage:.0%}; monitor the rest of your spending.")
+        else:
+            st.success(f"✅ Spending is within budget. {money(remaining)} remains.")
+
+        days_in_month = calendar.monthrange(today.year, today.month)[1]
+        days_remaining = max(days_in_month - today.day + 1, 1)
+        daily_allowance = max(remaining, 0.0) / days_remaining
+        st.caption(
+            f"Suggested daily allowance: **{money(daily_allowance)}** for the remaining "
+            f"**{days_remaining} day(s)** of {today.strftime('%B')}."
+        )
+
+    st.subheader("Spending by category")
+    if summary.empty:
+        st.info("No outgoing transactions have been recorded for this month yet.")
+    else:
+        chart_data = summary.set_index("Category")[["Spending (RM)"]]
+        st.bar_chart(chart_data, color=SKY_BLUE)
+        category_display = summary.copy()
+        category_display["Share"] = category_display["Spending (RM)"].map(
+            lambda value: f"{value / spent:.1%}" if spent else "0.0%"
+        )
+        category_display["Spending (RM)"] = category_display["Spending (RM)"].map(money)
+        st.dataframe(category_display, hide_index=True, use_container_width=True)
+
+
 def transactions_page(user: dict[str, Any]) -> None:
     """Show past transactions, let the user search/filter, and download a CSV."""
     page_title("Transaction History", "Review, filter and export your Finora account activity.")
@@ -1401,6 +1609,8 @@ def security_page(user: dict[str, Any]) -> None:
             ("Session timeout", "Active", "Automatic sign-out after 5 minutes of inactivity"),
             ("Improved OTP", "Active", "Random 6-digit code, 60-second expiry, 3 attempts"),
             ("CSV report export", "Active", "Filtered transaction statement download"),
+            ("Monthly budget planner", "Active", "Monthly target, alerts and category analysis"),
+            ("Security activity log", "Active", "Login, lock and OTP events saved to JSON"),
         ],
         columns=["Enhancement", "Status", "Implementation"],
     )
@@ -1415,6 +1625,21 @@ def security_page(user: dict[str, Any]) -> None:
         st.caption("Return to the transaction page to enter or regenerate the OTP.")
     else:
         st.info("No active OTP. Start a transfer, bill, card or deposit transaction to generate one.")
+
+    st.subheader("Security Activity Log")
+    st.caption("The latest login, account-lock, OTP and budget-security events are shown first.")
+    events = list(reversed(user.get("security_log", [])))[:20]
+    if not events:
+        st.info("No security events have been recorded yet.")
+    else:
+        event_table = pd.DataFrame(events).rename(
+            columns={"date": "Date", "event": "Event", "status": "Status", "details": "Details"}
+        )
+        st.dataframe(
+            event_table[["Date", "Event", "Status", "Details"]],
+            hide_index=True,
+            use_container_width=True,
+        )
 
 
 def main_app() -> None:
@@ -1449,6 +1674,7 @@ def main_app() -> None:
         "Pay Bills": bills_page,
         "Credit Card": credit_card_page,
         "Deposit": deposit_page,
+        "Budget Planner": budget_planner_page,
         "Transactions": transactions_page,
         "Security": security_page,
     }
