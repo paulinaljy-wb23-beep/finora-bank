@@ -76,9 +76,7 @@ class DataStoreError(Exception):
     """Raised when the local JSON data store cannot be read or written."""
 
 
-# -----------------------------------------------------------------------------
-# Security and data-storage helpers
-# -----------------------------------------------------------------------------
+# Security and storage helpers
 def hash_password(password: str, salt_hex: str | None = None) -> dict[str, str]:
     """Hash a password with PBKDF2-SHA256 and a random salt.
 
@@ -219,8 +217,7 @@ def load_data() -> dict[str, Any]:
             if not isinstance(data.get("users"), dict):
                 raise ValueError("Missing users collection")
 
-            # Migrate data created by earlier demonstration versions without
-            # deleting existing balances or transaction records.
+            # Keep old demo data working without losing balances or history.
             data_changed = False
             if "chai" in data["users"] and "paulina" not in data["users"]:
                 data["users"]["paulina"] = data["users"].pop("chai")
@@ -286,9 +283,7 @@ def visible_card_number(card_number: str) -> str:
     return " ".join(digits[index:index + 4] for index in range(0, len(digits), 4))
 
 
-# -----------------------------------------------------------------------------
-# Authentication and transaction logic (kept separate from the page layout)
-# -----------------------------------------------------------------------------
+# Authentication and transaction logic
 def authenticate(username: str, password: str) -> tuple[str, str]:
     """Authenticate a user and persist failed-attempt/account-lock information."""
     username = username.strip().lower()
@@ -303,7 +298,7 @@ def authenticate(username: str, password: str) -> tuple[str, str]:
             remaining = int(user["locked_until"] - current_time) + 1
             return "locked", f"Account locked. Try again in {remaining} seconds."
 
-        # A completed lock period restores the normal attempt counter.
+        # Reset the counter once the lock has expired.
         if user.get("locked_until", 0):
             user["locked_until"] = 0.0
             user["failed_attempts"] = 0
@@ -371,14 +366,14 @@ def transactions_csv(transactions: list[dict[str, Any]]) -> bytes:
     )
     writer.writeheader()
     writer.writerows(transactions)
-    # UTF-8 BOM helps Microsoft Excel display the file correctly.
+    # Excel handles the BOM better than a plain UTF-8 file.
     return output.getvalue().encode("utf-8-sig")
 
 
 def process_transaction(username: str, pending: dict[str, Any]) -> dict[str, Any]:
     """Validate and commit one OTP-approved transaction to the JSON file."""
     with DATA_LOCK:
-        data = load_data()  # Reload to use the newest persisted balance.
+        data = load_data()  # Use the latest saved balance.
         user = data["users"].get(username)
         if user is None:
             raise BankingError("The logged-in account no longer exists.")
@@ -448,7 +443,7 @@ def process_transaction(username: str, pending: dict[str, Any]) -> dict[str, Any
             )
 
         elif kind == "Deposit":
-            # This is a simulation: no real cash or external payment is accepted.
+            # Demo only: no real cash or payment is processed.
             user["balance"] = round(user["balance"] + amount, 2)
             add_transaction(user, "Deposit", details["source"], amount, ref)
 
@@ -468,24 +463,26 @@ def process_transaction(username: str, pending: dict[str, Any]) -> dict[str, Any
 def create_pending_transaction(kind: str, details: dict[str, Any], summary: str) -> None:
     """Generate a one-use OTP and store only its hash for verification."""
     otp = f"{secrets.randbelow(1_000_000):06d}"
+    created_at = time.time()
     st.session_state.pending_transaction = {
         "otp_id": uuid.uuid4().hex[:10],
         "kind": kind,
         "details": details,
         "summary": summary,
         "otp_hash": hashlib.sha256(otp.encode("utf-8")).hexdigest(),
-        "created_at": time.time(),
-        "expires_at": time.time() + OTP_VALID_SECONDS,
+        "created_at": created_at,
+        "expires_at": created_at + OTP_VALID_SECONDS,
+        # Start the official 60-second validity period only when the OTP panel
+        # is ready to display. This prevents page rendering time from reducing
+        # the countdown before the user can see it.
+        "countdown_started": False,
         "verification_attempts": 0,
     }
-    # In a real system the OTP is sent by SMS. It is displayed only so this
-    # offline classroom simulation can be demonstrated and tested.
+    # A real bank would send this by SMS; we show it here for the demo.
     st.session_state.demo_otp = otp
 
 
-# -----------------------------------------------------------------------------
 # Visual helpers
-# -----------------------------------------------------------------------------
 def image_data_uri(path: Path) -> str | None:
     """Convert a local image into an embeddable CSS data URI."""
     if not path.exists():
@@ -501,8 +498,8 @@ def inject_css() -> None:
     inside_background = image_data_uri(APP_DIR / "assets" / "finora_dashboard_background.png")
     if st.session_state.get("authenticated") and inside_background:
         page_background = (
-        f"url('{inside_background}') center center / cover fixed no-repeat"
-    )
+            f"url('{inside_background}') center center / cover fixed no-repeat"
+        )
     elif login_background:
         page_background = (
             "linear-gradient(rgba(5, 28, 65, .18), rgba(5, 45, 88, .30)), "
@@ -704,10 +701,8 @@ def sign_out(message: str | None = None) -> None:
 
 def change_page(page: str) -> None:
     """Navigate from a quick-action button to a sidebar page."""
-    # The sidebar radio using the ``navigation`` key has already been rendered
-    # when a Dashboard quick-action button is clicked. Streamlit does not allow
-    # that widget's value to be changed afterward in the same run, so store the
-    # request under a separate key and apply it before the next sidebar render.
+    # The radio is already rendered by the time a quick action is clicked.
+    # Save the target page and apply it on the next run instead.
     st.session_state.requested_page = page
     st.rerun()
 
@@ -722,9 +717,7 @@ def toggle_card_details() -> None:
     st.session_state.card_visible = not bool(st.session_state.get("card_visible", False))
 
 
-# -----------------------------------------------------------------------------
 # Login and sidebar
-# -----------------------------------------------------------------------------
 def login_page() -> None:
     """Display secure login and validate credentials."""
     left, centre, right = st.columns([1, 1.25, 1])
@@ -812,9 +805,7 @@ def sidebar(user: dict[str, Any]) -> str:
     return page
 
 
-# -----------------------------------------------------------------------------
 # Banking pages
-# -----------------------------------------------------------------------------
 def page_title(title: str, subtitle: str) -> None:
     """Render a consistent page heading."""
     st.title(title)
@@ -926,7 +917,9 @@ def dashboard_page(user: dict[str, Any]) -> None:
 
 def otp_countdown(expires_at: float, otp_id: str) -> None:
     """Render a live browser-side OTP countdown without blocking Streamlit."""
-    deadline_ms = int(expires_at * 1000)
+    # Pass a duration instead of an absolute timestamp. The user's computer
+    # clock can differ from the Streamlit server clock.
+    remaining_ms = max(0, int((expires_at - time.time()) * 1000))
     timer_id = f"otp-timer-{otp_id}"
     components.html(
         f"""
@@ -941,7 +934,7 @@ def otp_countdown(expires_at: float, otp_id: str) -> None:
           </div>
         </div>
         <script>
-          const deadline = {deadline_ms};
+          const deadline = Date.now() + {remaining_ms};
           const textElement = document.getElementById("{timer_id}-text");
           const barElement = document.getElementById("{timer_id}-bar");
           function updateTimer() {{
@@ -1019,6 +1012,15 @@ def otp_panel() -> None:
     pending = st.session_state.get("pending_transaction")
     if not pending:
         return
+
+    # The transaction form triggers a Streamlit rerun. Starting the countdown
+    # here ensures that the user receives the full validity period after the
+    # OTP interface becomes available, even if the rerun took several seconds.
+    if not pending.get("countdown_started", False):
+        countdown_started_at = time.time()
+        pending["created_at"] = countdown_started_at
+        pending["expires_at"] = countdown_started_at + OTP_VALID_SECONDS
+        pending["countdown_started"] = True
 
     st.divider()
     st.subheader("Secure verification")
@@ -1206,8 +1208,7 @@ def credit_card_page(user: dict[str, Any]) -> None:
     c3.metric("Available credit", money(card["limit"] - card["outstanding"]))
     minimum_payment = min(card["outstanding"], round(max(50.0, card["outstanding"] * 0.10), 2)) if card["outstanding"] else 0.0
 
-    # Keep this selector outside the form so choosing Custom amount reruns the
-    # page immediately and enables the amount input field.
+    # Keep this outside the form so Custom enables its input right away.
     option = st.radio(
         "Payment option",
         ["Minimum payment", "Full payment", "Custom amount"],
@@ -1346,14 +1347,13 @@ def security_page(user: dict[str, Any]) -> None:
 
 def main_app() -> None:
     """Route authenticated users to the selected banking page."""
-    # Session timeout is checked before updating the activity timestamp.
+    # Check the timeout before refreshing the activity timestamp.
     if time.time() - st.session_state.get("last_activity", time.time()) > SESSION_TIMEOUT_SECONDS:
         sign_out("timeout")
         st.rerun()
     st.session_state.last_activity = time.time()
 
-    # Apply a Quick Action navigation request before the sidebar radio widget
-    # is instantiated. This avoids StreamlitWidgetAlreadyInstantiatedError.
+    # Apply quick-action navigation before creating the sidebar radio.
     requested_page = st.session_state.pop("requested_page", None)
     if requested_page:
         st.session_state.navigation = requested_page
