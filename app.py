@@ -1,9 +1,10 @@
-"""Finora Bank - secure virtual banking simulation built with Streamlit.
+"""Finora Bank - a pretend online banking app made with Streamlit.
 
-Run with: streamlit run app.py
+Run it with: streamlit run app.py
 
-This application is for education and demonstration only. It does not connect
-to a real bank, payment gateway, SMS provider, or cash deposit machine.
+This is just a demo for learning and showing off. It does not connect to
+a real bank, a real payment system, a real SMS service, or a real cash
+machine. No real money ever moves here.
 """
 
 from __future__ import annotations
@@ -30,7 +31,7 @@ import streamlit.components.v1 as components
 
 
 # -----------------------------------------------------------------------------
-# Application configuration
+# App settings
 # -----------------------------------------------------------------------------
 APP_DIR = Path(__file__).resolve().parent
 DATA_FILE = APP_DIR / "bank_data.json"
@@ -69,19 +70,20 @@ NAVIGATION_LABELS = {
 
 
 class BankingError(Exception):
-    """A user-friendly banking validation error."""
+    """An error message we can show straight to the user, like "wrong OTP" or "not enough balance." """
 
 
 class DataStoreError(Exception):
-    """Raised when the local JSON data store cannot be read or written."""
+    """Raised when we can't read or save the bank_data.json file."""
 
 
-# Security and storage helpers
+# Password, OTP, and file-saving helpers
 def hash_password(password: str, salt_hex: str | None = None) -> dict[str, str]:
-    """Hash a password with PBKDF2-SHA256 and a random salt.
+    """Turn a plain password into a hash, so we never store the real password.
 
-    A salt prevents identical passwords from producing identical stored hashes.
-    Only the salt and derived hash are saved; the plain password is never saved.
+    We add a random "salt" first. That way, even if two people pick the
+    exact same password, the saved hash still looks different for each
+    of them.
     """
     salt = bytes.fromhex(salt_hex) if salt_hex else secrets.token_bytes(16)
     derived = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt, 200_000)
@@ -89,13 +91,13 @@ def hash_password(password: str, salt_hex: str | None = None) -> dict[str, str]:
 
 
 def verify_password(password: str, stored: dict[str, str]) -> bool:
-    """Safely compare an entered password with its stored password hash."""
+    """Check if the typed password matches the saved hash."""
     candidate = hash_password(password, stored["salt"])["hash"]
     return hmac.compare_digest(candidate, stored["hash"])
 
 
 def now_text() -> str:
-    """Return a readable timestamp for a transaction record."""
+    """Return the current date and time as a plain text string."""
     return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
 
@@ -105,12 +107,19 @@ def transaction_record(
     amount: float,
     balance_after: float,
     reference: str | None = None,
+    category: str | None = None,
 ) -> dict[str, Any]:
-    """Build one consistently formatted transaction dictionary."""
+    """Build one transaction entry with the same fields every time.
+
+    If no `category` is given, we just use the transaction type instead.
+    That way old records, and records that aren't bills, still show up
+    sensibly in the spending chart.
+    """
     return {
         "id": reference or f"FNB-{datetime.now():%Y%m%d}-{uuid.uuid4().hex[:8].upper()}",
         "date": now_text(),
         "type": transaction_type,
+        "category": category or transaction_type,
         "description": description,
         "amount": round(float(amount), 2),
         "balance_after": round(float(balance_after), 2),
@@ -118,7 +127,7 @@ def transaction_record(
 
 
 def create_seed_data() -> dict[str, Any]:
-    """Create two demonstration accounts on the application's first launch."""
+    """Set up two fake demo accounts the first time the app runs."""
     paulina_transactions = [
         {
             "id": "FNB-20260825-OPEN01",
@@ -190,7 +199,7 @@ def create_seed_data() -> dict[str, Any]:
 
 
 def save_data(data: dict[str, Any]) -> None:
-    """Atomically save bank data so an interrupted write cannot corrupt it."""
+    """Save the bank data to disk safely, so a crash mid-save can't corrupt the file."""
     temporary_file = DATA_FILE.with_suffix(".tmp")
     try:
         DATA_FILE.parent.mkdir(parents=True, exist_ok=True)
@@ -205,7 +214,7 @@ def save_data(data: dict[str, Any]) -> None:
 
 
 def load_data() -> dict[str, Any]:
-    """Load persistent data, creating safe demonstration data when absent."""
+    """Load the saved bank data, or create fresh demo data if none exists yet."""
     with DATA_LOCK:
         if not DATA_FILE.exists():
             data = create_seed_data()
@@ -217,7 +226,7 @@ def load_data() -> dict[str, Any]:
             if not isinstance(data.get("users"), dict):
                 raise ValueError("Missing users collection")
 
-            # Keep old demo data working without losing balances or history.
+            # Old save files used a different username - keep them working.
             data_changed = False
             if "chai" in data["users"] and "paulina" not in data["users"]:
                 data["users"]["paulina"] = data["users"].pop("chai")
@@ -253,7 +262,7 @@ def load_data() -> dict[str, Any]:
 
 
 def find_username_by_account(data: dict[str, Any], account_number: str) -> str | None:
-    """Return the username belonging to an exact account number."""
+    """Find which username owns this exact account number."""
     for username, user in data["users"].items():
         if user["account_number"] == account_number.strip():
             return username
@@ -261,31 +270,31 @@ def find_username_by_account(data: dict[str, Any], account_number: str) -> str |
 
 
 def valid_account_number(account_number: str) -> bool:
-    """Return True only for an account number containing exactly 10 digits."""
+    """Check that the account number is exactly 10 digits, nothing else."""
     cleaned = account_number.strip()
     return cleaned.isdigit() and len(cleaned) == ACCOUNT_NUMBER_LENGTH
 
 
 def card_number_digits(card_number: str) -> str:
-    """Return only the numeric characters from a demonstration card number."""
+    """Strip out everything except the digits from a card number."""
     return "".join(character for character in str(card_number) if character.isdigit())
 
 
 def masked_card_number(card_number: str) -> str:
-    """Mask a card number while keeping its final four digits visible."""
+    """Hide most of the card number, keep the last 4 digits visible."""
     digits = card_number_digits(card_number)
     return f"•••• •••• •••• {digits[-4:]}"
 
 
 def visible_card_number(card_number: str) -> str:
-    """Group a full demonstration card number into readable blocks of four."""
+    """Show the full demo card number, split into groups of 4 digits."""
     digits = card_number_digits(card_number)
     return " ".join(digits[index:index + 4] for index in range(0, len(digits), 4))
 
 
-# Authentication and transaction logic
+# Login and money-moving logic
 def authenticate(username: str, password: str) -> tuple[str, str]:
-    """Authenticate a user and persist failed-attempt/account-lock information."""
+    """Check a username and password, and save failed-login/lockout info."""
     username = username.strip().lower()
     with DATA_LOCK:
         data = load_data()
@@ -298,7 +307,7 @@ def authenticate(username: str, password: str) -> tuple[str, str]:
             remaining = int(user["locked_until"] - current_time) + 1
             return "locked", f"Account locked. Try again in {remaining} seconds."
 
-        # Reset the counter once the lock has expired.
+        # The lockout time is over, so reset the failed-attempt counter.
         if user.get("locked_until", 0):
             user["locked_until"] = 0.0
             user["failed_attempts"] = 0
@@ -320,15 +329,22 @@ def authenticate(username: str, password: str) -> tuple[str, str]:
         return "invalid", f"Invalid username or password. {attempts_left} attempt(s) remaining."
 
 
-def add_transaction(user: dict[str, Any], kind: str, description: str, amount: float, ref: str) -> None:
-    """Append a transaction using the user's current balance."""
+def add_transaction(
+    user: dict[str, Any],
+    kind: str,
+    description: str,
+    amount: float,
+    ref: str,
+    category: str | None = None,
+) -> None:
+    """Add one new transaction to this user's history."""
     user["transactions"].append(
-        transaction_record(kind, description, amount, user["balance"], reference=ref)
+        transaction_record(kind, description, amount, user["balance"], reference=ref, category=category)
     )
 
 
 def balance_history_frame(transactions: list[dict[str, Any]]) -> pd.DataFrame:
-    """Return chronological balance data suitable for a Streamlit line chart."""
+    """Turn the transaction list into balance-over-time data for the line chart."""
     if not transactions:
         return pd.DataFrame(columns=["Date", "Balance (RM)"])
 
@@ -343,37 +359,51 @@ def balance_history_frame(transactions: list[dict[str, Any]]) -> pd.DataFrame:
 
 
 def spending_summary(transactions: list[dict[str, Any]]) -> pd.DataFrame:
-    """Summarise outgoing transactions by category for analytics."""
+    """Add up outgoing money, grouped by category, for the spending chart.
+
+    Bill payments are grouped by their real category (Electricity, Water,
+    Internet, and so on) instead of the generic "Bill Payment" label, so
+    the chart shows where the money actually went. Everything else -
+    transfers, card payments, or old records saved before we tracked
+    categories - just falls back to its transaction type.
+    """
     outgoing = [item for item in transactions if float(item.get("amount", 0)) < 0]
     if not outgoing:
         return pd.DataFrame(columns=["Category", "Spending (RM)"])
 
     spending = pd.DataFrame(outgoing)
+    if "category" in spending.columns:
+        spending["Category"] = spending["category"].where(
+            spending["category"].notna(), spending["type"]
+        )
+    else:
+        spending["Category"] = spending["type"]
     spending["Spending (RM)"] = pd.to_numeric(spending["amount"], errors="coerce").abs()
     return (
-        spending.groupby("type", as_index=False)["Spending (RM)"]
+        spending.groupby("Category", as_index=False)["Spending (RM)"]
         .sum()
-        .rename(columns={"type": "Category"})
         .sort_values("Spending (RM)", ascending=False)
     )
 
 
 def transactions_csv(transactions: list[dict[str, Any]]) -> bytes:
-    """Create a consistently formatted UTF-8 CSV statement."""
+    """Turn a list of transactions into a CSV file the user can download."""
     output = io.StringIO()
     writer = csv.DictWriter(
-        output, fieldnames=["date", "id", "type", "description", "amount", "balance_after"]
+        output,
+        fieldnames=["date", "id", "type", "category", "description", "amount", "balance_after"],
+        extrasaction="ignore",
     )
     writer.writeheader()
     writer.writerows(transactions)
-    # Excel handles the BOM better than a plain UTF-8 file.
+    # This little marker (BOM) helps the file open correctly in Excel.
     return output.getvalue().encode("utf-8-sig")
 
 
 def process_transaction(username: str, pending: dict[str, Any]) -> dict[str, Any]:
-    """Validate and commit one OTP-approved transaction to the JSON file."""
+    """Check and save one transaction, after its OTP has been approved."""
     with DATA_LOCK:
-        data = load_data()  # Use the latest saved balance.
+        data = load_data()  # Load the newest saved balance first, in case it changed.
         user = data["users"].get(username)
         if user is None:
             raise BankingError("The logged-in account no longer exists.")
@@ -424,7 +454,7 @@ def process_transaction(username: str, pending: dict[str, Any]) -> dict[str, Any
             user["balance"] = round(user["balance"] - amount, 2)
             category = details.get("category", "Bill")
             description = f"{category}: {details['provider']} - {details['customer_reference']}"
-            add_transaction(user, "Bill Payment", description, -amount, ref)
+            add_transaction(user, "Bill Payment", description, -amount, ref, category=category)
 
         elif kind == "Credit Card Payment":
             outstanding = float(user["credit_card"]["outstanding"])
@@ -443,7 +473,7 @@ def process_transaction(username: str, pending: dict[str, Any]) -> dict[str, Any
             )
 
         elif kind == "Deposit":
-            # Demo only: no real cash or payment is processed.
+            # This is just a demo - no real cash is actually deposited.
             user["balance"] = round(user["balance"] + amount, 2)
             add_transaction(user, "Deposit", details["source"], amount, ref)
 
@@ -461,7 +491,7 @@ def process_transaction(username: str, pending: dict[str, Any]) -> dict[str, Any
 
 
 def create_pending_transaction(kind: str, details: dict[str, Any], summary: str) -> None:
-    """Generate a one-use OTP and store only its hash for verification."""
+    """Make a new one-time OTP code, and only save its hash, not the code."""
     otp = f"{secrets.randbelow(1_000_000):06d}"
     created_at = time.time()
     st.session_state.pending_transaction = {
@@ -472,19 +502,20 @@ def create_pending_transaction(kind: str, details: dict[str, Any], summary: str)
         "otp_hash": hashlib.sha256(otp.encode("utf-8")).hexdigest(),
         "created_at": created_at,
         "expires_at": created_at + OTP_VALID_SECONDS,
-        # Start the official 60-second validity period only when the OTP panel
-        # is ready to display. This prevents page rendering time from reducing
-        # the countdown before the user can see it.
+        # Don't start the 60-second timer yet. We start it later, once the
+        # OTP box is actually on screen, so page-loading time doesn't eat
+        # into the time the user actually gets to enter the code.
         "countdown_started": False,
         "verification_attempts": 0,
     }
-    # A real bank would send this by SMS; we show it here for the demo.
+    # A real bank would text this code to the user. Here we just show it
+    # on screen instead, since this is only a demo.
     st.session_state.demo_otp = otp
 
 
-# Visual helpers
+# Styling and image helpers
 def image_data_uri(path: Path) -> str | None:
-    """Convert a local image into an embeddable CSS data URI."""
+    """Turn a local image file into text, so it can be embedded in the page."""
     if not path.exists():
         return None
     mime_type = "image/png" if path.suffix.lower() == ".png" else "image/jpeg"
@@ -493,7 +524,7 @@ def image_data_uri(path: Path) -> str | None:
 
 
 def inject_css() -> None:
-    """Apply the Finora blue, sky-blue, white and mint visual identity."""
+    """Add the Finora look (blue, sky blue, white, and mint colors) to the page."""
     login_background = image_data_uri(APP_DIR / "assets" / "finora_background_v2.png")
     inside_background = image_data_uri(APP_DIR / "assets" / "finora_dashboard_background.png")
     if st.session_state.get("authenticated") and inside_background:
@@ -647,6 +678,17 @@ def inject_css() -> None:
             .hero-features {{ grid-template-columns:1fr; max-width:330px; }}
             .hero-feature {{ min-height:auto; }}
         }}
+        @media (max-width: 480px) {{
+            .block-container {{ padding-top: 3rem; padding-left: .8rem; padding-right: .8rem; }}
+            .dashboard-hero {{ padding:1.1rem; }}
+            .dashboard-hero h2 {{ font-size:1.5rem; max-width:100%; }}
+            .dashboard-hero p {{ font-size:.85rem; max-width:100%; }}
+            .hero-feature {{ padding:.55rem .65rem; }}
+            .hero-feature strong {{ font-size:.76rem; }}
+            .hero-feature span {{ font-size:.66rem; }}
+            .card-number-value {{ font-size:1.0rem; white-space:normal; }}
+            [data-testid="stSidebar"] [role="radiogroup"] label {{ padding:.55rem .6rem; }}
+        }}
         </style>
         """,
         unsafe_allow_html=True,
@@ -654,7 +696,7 @@ def inject_css() -> None:
 
 
 def brand_header(compact: bool = False) -> None:
-    """Render the uploaded logo, with a text fallback if the file is absent."""
+    """Show the Finora logo image, or a text logo if the image file is missing."""
     logo_path = APP_DIR / "assets" / "finora_logo.png"
     if logo_path.exists():
         logo_uri = image_data_uri(logo_path)
@@ -678,17 +720,17 @@ def brand_header(compact: bool = False) -> None:
 
 
 def money(value: float) -> str:
-    """Format a number as Malaysian ringgit."""
+    """Turn a number into a Malaysian ringgit amount, like "RM 1,234.56"."""
     return f"RM {float(value):,.2f}"
 
 
 def current_user(data: dict[str, Any]) -> dict[str, Any]:
-    """Return the logged-in user record."""
+    """Get the account data for whoever is logged in right now."""
     return data["users"][st.session_state.username]
 
 
 def sign_out(message: str | None = None) -> None:
-    """Clear all authentication and transaction state."""
+    """Log the user out and clear everything tied to their session."""
     for key in [
         "authenticated", "username", "last_activity", "pending_transaction",
         "demo_otp", "transaction_result", "navigation", "requested_page",
@@ -700,26 +742,27 @@ def sign_out(message: str | None = None) -> None:
 
 
 def change_page(page: str) -> None:
-    """Navigate from a quick-action button to a sidebar page."""
-    # The radio is already rendered by the time a quick action is clicked.
-    # Save the target page and apply it on the next run instead.
+    """Jump to a different page when a quick-action button is clicked."""
+    # The sidebar menu is already drawn by the time this button is clicked,
+    # so we can't change it right this second. Save the page we want and
+    # switch to it on the next run instead.
     st.session_state.requested_page = page
     st.rerun()
 
 
 def toggle_account_details() -> None:
-    """Toggle sidebar privacy before Streamlit renders the current page."""
+    """Switch the sidebar balance between hidden and shown."""
     st.session_state.account_visible = not bool(st.session_state.get("account_visible", False))
 
 
 def toggle_card_details() -> None:
-    """Toggle the demonstration card number without changing navigation."""
+    """Switch the card number between hidden and shown."""
     st.session_state.card_visible = not bool(st.session_state.get("card_visible", False))
 
 
-# Login and sidebar
+# Login page and sidebar menu
 def login_page() -> None:
-    """Display secure login and validate credentials."""
+    """Show the login form and check the username and password."""
     left, centre, right = st.columns([1, 1.25, 1])
     with centre:
         brand_header()
@@ -760,10 +803,30 @@ def login_page() -> None:
         with st.expander("Demonstration login"):
             st.code("Username: Paulina\nPassword: Finora@123")
             st.caption("The password is stored as a salted hash in the JSON data file.")
+        st.caption(
+            "This demo only has two fixed accounts, so there's no sign-up or "
+            "'forgot password' page - that's on purpose, not missing. Use the "
+            "demo login above."
+        )
+
+        with st.expander("About this project"):
+            st.markdown(
+                "Finora Bank is a demo banking app built with **Streamlit** and "
+                "**Python**. A few things it does under the hood:\n\n"
+                "- Passwords are hashed with **PBKDF2-SHA256** and a random salt "
+                "- the plain password is never stored\n"
+                "- Money-moving actions need a one-time **OTP** code that expires "
+                "after 60 seconds\n"
+                "- Login locks for 60 seconds after 3 wrong password attempts\n"
+                "- Account data is saved with an **atomic write**, so a crash "
+                "mid-save can't corrupt the file\n\n"
+                "It's a personal/learning project - no real bank, money, or "
+                "SMS provider is connected."
+            )
 
 
 def sidebar(user: dict[str, Any]) -> str:
-    """Display account identity, navigation and safe logout controls."""
+    """Show the account name, balance, page menu, and sign-out button."""
     with st.sidebar:
         st.markdown("## FINORA BANK")
         st.caption("SECURE • SIMPLE • SMART")
@@ -805,15 +868,15 @@ def sidebar(user: dict[str, Any]) -> str:
     return page
 
 
-# Banking pages
+# The actual banking pages (Dashboard, Transfer, and so on)
 def page_title(title: str, subtitle: str) -> None:
-    """Render a consistent page heading."""
+    """Show a page title with a short description underneath it."""
     st.title(title)
     st.markdown(f"<p class='muted'>{html.escape(subtitle)}</p>", unsafe_allow_html=True)
 
 
 def dashboard_page(user: dict[str, Any]) -> None:
-    """Show balance, quick actions, recent activity and spending analytics."""
+    """Show the balance, quick-action buttons, recent activity, and charts."""
     first_name = html.escape(user["full_name"].split()[0])
     hero_image = image_data_uri(APP_DIR / "assets" / "finora_dashboard_hero.png")
     if hero_image:
@@ -916,9 +979,9 @@ def dashboard_page(user: dict[str, Any]) -> None:
 
 
 def otp_countdown(expires_at: float, otp_id: str) -> None:
-    """Render a live browser-side OTP countdown without blocking Streamlit."""
-    # Pass a duration instead of an absolute timestamp. The user's computer
-    # clock can differ from the Streamlit server clock.
+    """Show a live countdown timer for the OTP, running in the browser."""
+    # We send a countdown length, not a fixed clock time, because the
+    # user's computer clock might not match the server's clock.
     remaining_ms = max(0, int((expires_at - time.time()) * 1000))
     timer_id = f"otp-timer-{otp_id}"
     components.html(
@@ -956,9 +1019,12 @@ def otp_countdown(expires_at: float, otp_id: str) -> None:
     )
 
 
-def session_countdown(expires_at: float) -> None:
-    """Render the current session timeout as a live browser-side countdown."""
-    deadline_ms = int(expires_at * 1000)
+def session_countdown(duration_seconds: int = SESSION_TIMEOUT_SECONDS) -> None:
+    """Show a browser-side session countdown from the exact duration."""
+    # Use a duration instead of a server timestamp. The Streamlit server and
+    # the user's computer can have slightly different clocks, which previously
+    # caused a five-minute timer to begin at values such as 5:02.
+    duration_ms = max(0, int(duration_seconds * 1000))
     components.html(
         f"""
         <div style="font-family:Arial,sans-serif;padding:2px 1px 0;color:#123B6D;">
@@ -976,8 +1042,8 @@ def session_countdown(expires_at: float) -> None:
           </div>
         </div>
         <script>
-          const sessionDeadline = {deadline_ms};
           const sessionTotal = {SESSION_TIMEOUT_SECONDS};
+          const sessionDeadline = Date.now() + {duration_ms};
           const sessionText = document.getElementById("session-timer-text");
           const sessionBar = document.getElementById("session-timer-bar");
           const sessionNote = document.getElementById("session-timer-note");
@@ -1008,14 +1074,14 @@ def session_countdown(expires_at: float) -> None:
 
 
 def otp_panel() -> None:
-    """Display and verify the OTP for the active pending transaction."""
+    """Show the OTP box and check the code the user types in."""
     pending = st.session_state.get("pending_transaction")
     if not pending:
         return
 
-    # The transaction form triggers a Streamlit rerun. Starting the countdown
-    # here ensures that the user receives the full validity period after the
-    # OTP interface becomes available, even if the rerun took several seconds.
+    # Submitting the form reloads the page. We start the 60-second timer
+    # here instead of earlier, so the user still gets the full 60 seconds
+    # even if that reload took a moment.
     if not pending.get("countdown_started", False):
         countdown_started_at = time.time()
         pending["created_at"] = countdown_started_at
@@ -1032,7 +1098,12 @@ def otp_panel() -> None:
 
     with st.expander("View demonstration OTP", expanded=True):
         st.code(st.session_state.get("demo_otp", "------"), language=None)
-        st.caption("Simulation only. A production bank would send this code through a secure channel.")
+        st.caption(
+            "This code is shown here on purpose, just for the demo. A real bank "
+            "would send it by SMS or a push notification, and would never show "
+            "it on screen like this. That SMS/push step is what a production "
+            "version of this app would plug in here instead."
+        )
 
     with st.form("otp_form"):
         entered_otp = st.text_input("6-digit OTP", max_chars=6, placeholder="Enter verification code")
@@ -1078,7 +1149,7 @@ def otp_panel() -> None:
 
 
 def show_transaction_result() -> None:
-    """Show a one-time transaction receipt after successful OTP processing."""
+    """Show a "your transaction worked" message, once, right after it happens."""
     result = st.session_state.pop("transaction_result", None)
     if not result:
         return
@@ -1094,7 +1165,7 @@ def show_transaction_result() -> None:
 
 
 def transfer_page(user: dict[str, Any]) -> None:
-    """Collect and validate a transfer before requesting OTP approval."""
+    """Take the transfer details, check them, then ask for the OTP."""
     page_title("Transfer Money", "Send funds to a Finora or simulated external account.")
     show_transaction_result()
     st.metric("Available balance", money(user["balance"]))
@@ -1135,7 +1206,7 @@ def transfer_page(user: dict[str, Any]) -> None:
 
 
 def bills_page(user: dict[str, Any]) -> None:
-    """Provide service selection and a validated bill-payment workflow."""
+    """Let the user pick a bill, check the details, then ask for the OTP."""
     page_title("Pay Bills", "Pay utilities and services from your savings account.")
     show_transaction_result()
     category = st.selectbox(
@@ -1175,7 +1246,7 @@ def bills_page(user: dict[str, Any]) -> None:
 
 
 def credit_card_page(user: dict[str, Any]) -> None:
-    """Display card details and process minimum, full or custom payments."""
+    """Show the card details and handle minimum, full, or custom payments."""
     card = user["credit_card"]
     page_title("Credit Card", "View and pay your Finora credit card securely.")
     show_transaction_result()
@@ -1208,7 +1279,8 @@ def credit_card_page(user: dict[str, Any]) -> None:
     c3.metric("Available credit", money(card["limit"] - card["outstanding"]))
     minimum_payment = min(card["outstanding"], round(max(50.0, card["outstanding"] * 0.10), 2)) if card["outstanding"] else 0.0
 
-    # Keep this outside the form so Custom enables its input right away.
+    # This has to sit outside the form. That way, picking "Custom" shows
+    # its input box right away, instead of waiting for a submit click.
     option = st.radio(
         "Payment option",
         ["Minimum payment", "Full payment", "Custom amount"],
@@ -1251,7 +1323,7 @@ def credit_card_page(user: dict[str, Any]) -> None:
 
 
 def deposit_page(user: dict[str, Any]) -> None:
-    """Simulate a verified deposit into the logged-in account."""
+    """Pretend to add money to the account. Demo only, no real deposit."""
     page_title("Make a Deposit", "Simulate adding funds to your Finora savings account.")
     show_transaction_result()
     st.warning("Demonstration mode: this does not accept or move real money.")
@@ -1273,7 +1345,7 @@ def deposit_page(user: dict[str, Any]) -> None:
 
 
 def transactions_page(user: dict[str, Any]) -> None:
-    """Show searchable transaction history and a downloadable CSV statement."""
+    """Show past transactions, let the user search/filter, and download a CSV."""
     page_title("Transaction History", "Review, filter and export your Finora account activity.")
     transactions = list(reversed(user["transactions"]))
     if not transactions:
@@ -1312,7 +1384,7 @@ def transactions_page(user: dict[str, Any]) -> None:
 
 
 def security_page(user: dict[str, Any]) -> None:
-    """Explain the demonstrable security controls and current session state."""
+    """Show what security features this demo has, and the current session status."""
     page_title("Security Centre", "Review the protection features used by this simulation.")
     st.success("Your account session is active.")
     c1, c2, c3 = st.columns(3)
@@ -1334,7 +1406,7 @@ def security_page(user: dict[str, Any]) -> None:
     )
     st.dataframe(enhancements, hide_index=True, use_container_width=True)
     st.subheader("Live security countdowns")
-    session_countdown(st.session_state.last_activity + SESSION_TIMEOUT_SECONDS)
+    session_countdown(SESSION_TIMEOUT_SECONDS)
 
     pending = st.session_state.get("pending_transaction")
     if pending:
@@ -1346,14 +1418,15 @@ def security_page(user: dict[str, Any]) -> None:
 
 
 def main_app() -> None:
-    """Route authenticated users to the selected banking page."""
-    # Check the timeout before refreshing the activity timestamp.
+    """Send a logged-in user to whichever banking page they picked."""
+    # Check if the session has already timed out, before resetting the activity clock.
     if time.time() - st.session_state.get("last_activity", time.time()) > SESSION_TIMEOUT_SECONDS:
         sign_out("timeout")
         st.rerun()
     st.session_state.last_activity = time.time()
 
-    # Apply quick-action navigation before creating the sidebar radio.
+    # If a quick-action button asked for a page switch, do that now,
+    # before the sidebar menu gets drawn.
     requested_page = st.session_state.pop("requested_page", None)
     if requested_page:
         st.session_state.navigation = requested_page
@@ -1387,7 +1460,7 @@ def main_app() -> None:
 
 
 def main() -> None:
-    """Configure Streamlit and start the correct authenticated view."""
+    """Set up the page, then show either the login screen or the main app."""
     st.set_page_config(
         page_title="Finora Bank",
         page_icon="🏦",
