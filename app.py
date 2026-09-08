@@ -12,6 +12,7 @@ from __future__ import annotations
 import csv
 import base64
 import calendar
+import math
 import hashlib
 import hmac
 import html
@@ -22,7 +23,7 @@ import secrets
 import threading
 import time
 import uuid
-from datetime import datetime
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -42,7 +43,9 @@ SESSION_TIMEOUT_SECONDS = 5 * 60
 ACCOUNT_LOCK_SECONDS = 60
 MAX_LOGIN_ATTEMPTS = 3
 ACCOUNT_NUMBER_LENGTH = 10
-DATA_SCHEMA_VERSION = 4
+DATA_SCHEMA_VERSION = 5
+GOAL_CATEGORIES = ["Travel Fund", "House Fund", "Emergency Fund", "Retirement Fund", "Custom Goal"]
+INTERNAL_SAVINGS_TYPES = {"Savings Contribution", "Savings Withdrawal"}
 DEMO_CARD_NUMBER = "5212345678904821"
 
 DEEP_BLUE = "#123B6D"
@@ -66,6 +69,7 @@ NAVIGATION_LABELS = {
     "Credit Card": "💳  Credit Card",
     "Deposit": "➕  Deposit",
     "Budget Planner": "📊  Budget Planner",
+    "Savings Goals": "🎯  Savings Goals",
     "Transactions": "📄  Transactions",
     "Security": "🛡️  Security",
 }
@@ -177,6 +181,7 @@ def create_seed_data() -> dict[str, Any]:
                 "locked_until": 0.0,
                 "monthly_budget": 3000.0,
                 "security_log": [],
+                "savings_goals": [],
                 "transactions": paulina_transactions,
             },
             "alex": {
@@ -189,6 +194,7 @@ def create_seed_data() -> dict[str, Any]:
                 "locked_until": 0.0,
                 "monthly_budget": 2000.0,
                 "security_log": [],
+                "savings_goals": [],
                 "transactions": [
                     {
                         "id": "FNB-20260820-OPEN02",
@@ -258,6 +264,9 @@ def load_data() -> dict[str, Any]:
             # security audit trail. setdefault also repairs older save files
             # that do not contain one of these fields.
             for user in data["users"].values():
+                if "savings_goals" not in user:
+                    user["savings_goals"] = []
+                    data_changed = True
                 if "monthly_budget" not in user:
                     user["monthly_budget"] = 3000.0
                     data_changed = True
@@ -418,7 +427,7 @@ def spending_summary(transactions: list[dict[str, Any]]) -> pd.DataFrame:
     transfers, card payments, or old records saved before we tracked
     categories - just falls back to its transaction type.
     """
-    outgoing = [item for item in transactions if float(item.get("amount", 0)) < 0]
+    outgoing = [item for item in transactions if is_spending(item)]
     if not outgoing:
         return pd.DataFrame(columns=["Category", "Spending (RM)"])
 
@@ -435,6 +444,52 @@ def spending_summary(transactions: list[dict[str, Any]]) -> pd.DataFrame:
         .sum()
         .sort_values("Spending (RM)", ascending=False)
     )
+
+
+def is_spending(item: dict[str, Any]) -> bool:
+    """Moving money into a personal goal is saving, not spending."""
+    return float(item.get("amount", 0)) < 0 and item.get("type") not in INTERNAL_SAVINGS_TYPES
+
+
+def create_savings_goal(username: str, name: str, category: str, target: float, deadline: date) -> str:
+    """Create an empty goal without minting or moving any money."""
+    name = name.strip()
+    if not name or len(name) > 60:
+        raise BankingError("Enter a goal name between 1 and 60 characters.")
+    if category not in GOAL_CATEGORIES:
+        raise BankingError("Select a valid goal category.")
+    target = round(float(target), 2)
+    if not math.isfinite(target) or not 0 < target <= 1_000_000_000:
+        raise BankingError("Target must be between RM 0.01 and RM 1,000,000,000.")
+    if deadline <= date.today():
+        raise BankingError("Choose a target date after today.")
+    with DATA_LOCK:
+        data = load_data()
+        user = data["users"].get(username)
+        if user is None:
+            raise BankingError("Account not found.")
+        goals = user.setdefault("savings_goals", [])
+        if any(goal["name"].casefold() == name.casefold() for goal in goals):
+            raise BankingError("You already have a goal with this name.")
+        goal_id = uuid.uuid4().hex
+        goals.append({"id": goal_id, "name": name, "category": category,
+                      "target": target, "saved": 0.0, "deadline": deadline.isoformat(),
+                      "created_at": now_text()})
+        add_security_event(user, "Savings goal created", "Successful", name)
+        save_data(data)
+    return goal_id
+
+
+def savings_goal_progress(goal: dict[str, Any], today: date | None = None) -> dict[str, Any]:
+    """Calculate a contribution estimate with no assumed interest or investment return."""
+    today = today or date.today()
+    deadline = date.fromisoformat(goal["deadline"])
+    remaining = round(max(0.0, float(goal["target"]) - float(goal["saved"])), 2)
+    months = max(1, (deadline.year - today.year) * 12 + deadline.month - today.month
+                 + int(deadline.day > today.day))
+    return {"remaining": remaining, "ratio": min(1.0, float(goal["saved"]) / float(goal["target"])),
+            "months": months, "monthly": math.ceil(remaining * 100 / months) / 100,
+            "overdue": deadline <= today and remaining > 0}
 
 
 def current_month_transactions(
@@ -499,10 +554,12 @@ def process_transaction(username: str, pending: dict[str, Any]) -> dict[str, Any
         kind = pending["kind"]
         details = pending["details"]
         amount = round(float(details["amount"]), 2)
-        if amount <= 0:
+        if not math.isfinite(amount) or amount <= 0:
             raise BankingError("Amount must be greater than RM 0.00.")
 
-        ref = f"FNB-{datetime.now():%Y%m%d}-{uuid.uuid4().hex[:8].upper()}"
+        ref = pending.get("transaction_id") or f"FNB-{datetime.now():%Y%m%d}-{uuid.uuid4().hex[:8].upper()}"
+        if any(item["id"] == ref for item in user["transactions"]):
+            raise BankingError("This transaction has already been completed. Start a new transaction.")
 
         if kind == "Transfer":
             recipient_account = str(details["recipient_account"]).strip()
@@ -560,6 +617,28 @@ def process_transaction(username: str, pending: dict[str, Any]) -> dict[str, Any
                 ref,
             )
 
+        elif kind in INTERNAL_SAVINGS_TYPES:
+            goal = next((g for g in user.get("savings_goals", [])
+                         if g["id"] == details.get("goal_id")), None)
+            if goal is None:
+                raise BankingError("This savings goal does not belong to your account.")
+            if kind == "Savings Contribution":
+                if amount > user["balance"]:
+                    raise BankingError("Insufficient available balance to add savings.")
+                if amount > round(goal["target"] - goal["saved"], 2):
+                    raise BankingError("Amount exceeds what is needed to complete this goal.")
+                user["balance"] = round(user["balance"] - amount, 2)
+                goal["saved"] = round(goal["saved"] + amount, 2)
+                signed_amount = -amount
+            else:
+                if amount > goal["saved"]:
+                    raise BankingError("You cannot withdraw more than this goal holds.")
+                goal["saved"] = round(goal["saved"] - amount, 2)
+                user["balance"] = round(user["balance"] + amount, 2)
+                signed_amount = amount
+            add_transaction(user, kind, f"{goal['name']} — {goal['category']}",
+                            signed_amount, ref, category="Internal savings")
+
         elif kind == "Deposit":
             # This is just a demo - no real cash is actually deposited.
             user["balance"] = round(user["balance"] + amount, 2)
@@ -568,6 +647,9 @@ def process_transaction(username: str, pending: dict[str, Any]) -> dict[str, Any
         else:
             raise BankingError("Unknown transaction type.")
 
+        # Commit the audit event with the balances, so a separate log write
+        # cannot fail after the money has already moved.
+        add_security_event(user, "OTP verification", "Successful", f"{kind}; reference {ref}")
         save_data(data)
         return {
             "reference": ref,
@@ -583,6 +665,7 @@ def create_pending_transaction(kind: str, details: dict[str, Any], summary: str)
     otp = f"{secrets.randbelow(1_000_000):06d}"
     created_at = time.time()
     st.session_state.pending_transaction = {
+        "transaction_id": f"FNB-{datetime.now():%Y%m%d}-{uuid.uuid4().hex.upper()}",
         "otp_id": uuid.uuid4().hex[:10],
         "kind": kind,
         "details": details,
@@ -951,7 +1034,7 @@ def sidebar(user: dict[str, Any]) -> str:
         st.divider()
         pages = [
             "Dashboard", "Transfer", "Pay Bills", "Credit Card",
-            "Deposit", "Budget Planner", "Transactions", "Security",
+            "Deposit", "Budget Planner", "Savings Goals", "Transactions", "Security",
         ]
         if st.session_state.get("navigation") not in pages:
             st.session_state.navigation = "Dashboard"
@@ -1013,7 +1096,7 @@ def dashboard_page(user: dict[str, Any]) -> None:
         )
 
     transactions = user["transactions"]
-    outgoing = [t for t in transactions if float(t["amount"]) < 0]
+    outgoing = [t for t in transactions if is_spending(t)]
     current_month = datetime.now().strftime("%Y-%m")
     monthly_spending = -sum(float(t["amount"]) for t in outgoing if t["date"].startswith(current_month))
 
@@ -1263,12 +1346,6 @@ def otp_panel() -> None:
 
         try:
             result = process_transaction(st.session_state.username, pending)
-            record_security_event(
-                st.session_state.username,
-                "OTP verification",
-                "Successful",
-                f"{pending['kind']}; reference {result['reference']}",
-            )
             st.session_state.transaction_result = result
             st.session_state.pop("pending_transaction", None)
             st.session_state.pop("demo_otp", None)
@@ -1473,6 +1550,92 @@ def deposit_page(user: dict[str, Any]) -> None:
     otp_panel()
 
 
+def savings_goals_page(user: dict[str, Any]) -> None:
+    """Keep goal funds separate from spendable money, using the shared OTP workflow."""
+    page_title("Savings Goals", "Make room for travel, a home, emergencies and retirement.")
+    show_transaction_result()
+    goals = user.get("savings_goals", [])
+    reserved = round(sum(float(g["saved"]) for g in goals), 2)
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Available to spend", money(user["balance"]))
+    c2.metric("Saved in goals", money(reserved))
+    c3.metric("Total savings funds", money(user["balance"] + reserved))
+    st.caption("Goal funds are set aside from your available balance. Moving them is not spending.")
+
+    # One pending transaction at a time; don't silently replace an active OTP.
+    if st.session_state.get("pending_transaction"):
+        st.info("Complete or cancel your pending transaction before managing goals.")
+        otp_panel()
+        return
+
+    with st.expander("Create a savings goal", expanded=not goals):
+        with st.form("create_savings_goal"):
+            category = st.selectbox("Goal type", GOAL_CATEGORIES)
+            name = st.text_input("Goal name", max_chars=60, placeholder="e.g. Japan trip or My emergency fund")
+            target = st.number_input("Target amount (RM)", min_value=0.01,
+                                     max_value=1_000_000_000.0, value=6000.0, step=100.0)
+            deadline = st.date_input("Target date", value=date.today() + timedelta(days=365),
+                                     min_value=date.today() + timedelta(days=1),
+                                     max_value=date.today() + timedelta(days=365 * 80))
+            created = st.form_submit_button("Create goal", type="primary")
+        if created:
+            try:
+                create_savings_goal(st.session_state.username, name, category, target, deadline)
+                st.rerun()
+            except (BankingError, DataStoreError) as exc:
+                st.error(str(exc))
+
+    if not goals:
+        st.info("Create your first goal above. Every goal starts at RM 0.00.")
+        return
+
+    st.subheader("Your goals")
+    for goal in goals:
+        progress = savings_goal_progress(goal)
+        with st.container(border=True):
+            st.subheader(goal["name"])
+            st.caption(f"{goal['category']} · Target date: {goal['deadline']}")
+            st.progress(progress["ratio"], text=f"{progress['ratio']:.1%} complete")
+            a, b, c = st.columns(3)
+            a.metric("Saved", money(goal["saved"]))
+            b.metric("Target", money(goal["target"]))
+            c.metric("Still needed", money(progress["remaining"]))
+            if progress["remaining"] == 0:
+                st.success("Goal reached! Your funds remain available to transfer back.")
+            elif progress["overdue"]:
+                st.warning("The target date has passed. You can still add savings towards this goal.")
+            else:
+                st.write(f"Aim to save **{money(progress['monthly'])} per month** "
+                         f"over approximately {progress['months']} month(s).")
+            if goal["category"] == "Retirement Fund":
+                st.caption("This tracks your chosen savings target; it does not determine whether you can retire.")
+    st.caption("Monthly estimates round partial months up and assume no interest or investment growth.")
+
+    st.subheader("Move money")
+    goal_map = {goal["id"]: goal for goal in goals}
+    selected_id = st.selectbox("Choose a goal", list(goal_map),
+                               format_func=lambda value: goal_map[value]["name"])
+    selected = goal_map[selected_id]
+    action = st.radio("Action", ["Add savings", "Withdraw savings"], horizontal=True)
+    maximum = min(user["balance"], round(selected["target"] - selected["saved"], 2)) if action == "Add savings" else selected["saved"]
+    st.caption(f"Maximum for this action: {money(maximum)}. Withdrawals return to your available balance.")
+    with st.form("move_goal_money"):
+        amount = st.number_input("Amount (RM)", min_value=0.0, value=0.0, step=50.0, format="%.2f")
+        submitted = st.form_submit_button("Continue to OTP", type="primary", disabled=maximum <= 0)
+    if submitted:
+        if amount <= 0 or amount > maximum:
+            st.error(f"Enter an amount above RM 0.00 and no more than {money(maximum)}.")
+        else:
+            kind = "Savings Contribution" if action == "Add savings" else "Savings Withdrawal"
+            direction = "into" if action == "Add savings" else "from"
+            try:
+                create_pending_transaction(kind, {"goal_id": selected_id, "amount": amount},
+                                           f"Move {money(amount)} {direction} {selected['name']}.")
+                st.rerun()
+            except DataStoreError as exc:
+                st.error(str(exc))
+
+
 def budget_planner_page(user: dict[str, Any]) -> None:
     """Help the user set and monitor a monthly spending target."""
     today = datetime.now()
@@ -1611,6 +1774,7 @@ def security_page(user: dict[str, Any]) -> None:
             ("CSV report export", "Active", "Filtered transaction statement download"),
             ("Monthly budget planner", "Active", "Monthly target, alerts and category analysis"),
             ("Security activity log", "Active", "Login, lock and OTP events saved to JSON"),
+            ("Savings goals", "Active", "Separate goal funds, OTP transfers and progress tracking"),
         ],
         columns=["Enhancement", "Status", "Implementation"],
     )
@@ -1675,6 +1839,7 @@ def main_app() -> None:
         "Credit Card": credit_card_page,
         "Deposit": deposit_page,
         "Budget Planner": budget_planner_page,
+        "Savings Goals": savings_goals_page,
         "Transactions": transactions_page,
         "Security": security_page,
     }
