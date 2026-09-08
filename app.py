@@ -480,6 +480,26 @@ def create_savings_goal(username: str, name: str, category: str, target: float, 
     return goal_id
 
 
+def delete_savings_goal(username: str, goal_id: str) -> None:
+    """Delete only an owned empty goal, preserving money and transaction history."""
+    with DATA_LOCK:
+        data = load_data()
+        user = data["users"].get(username)
+        if user is None:
+            raise BankingError("Account not found.")
+        goals = user.get("savings_goals", [])
+        goal = next((item for item in goals if item["id"] == goal_id), None)
+        if goal is None:
+            raise BankingError("Goal not found. It may already have been deleted.")
+        # Reload under the lock: another session may have funded this goal
+        # since the page was displayed.
+        if float(goal["saved"]) != 0.0:
+            raise BankingError("Withdraw all savings back to your account before deleting this goal.")
+        user["savings_goals"] = [item for item in goals if item["id"] != goal_id]
+        add_security_event(user, "Savings goal deleted", "Successful", goal["name"])
+        save_data(data)
+
+
 def savings_goal_progress(goal: dict[str, Any], today: date | None = None) -> dict[str, Any]:
     """Calculate a contribution estimate with no assumed interest or investment return."""
     today = today or date.today()
@@ -1554,6 +1574,8 @@ def savings_goals_page(user: dict[str, Any]) -> None:
     """Keep goal funds separate from spendable money, using the shared OTP workflow."""
     page_title("Savings Goals", "Make room for travel, a home, emergencies and retirement.")
     show_transaction_result()
+    if st.session_state.pop("goal_deleted_message", False):
+        st.success("Savings goal deleted. Your transaction history has been kept.")
     goals = user.get("savings_goals", [])
     reserved = round(sum(float(g["saved"]) for g in goals), 2)
     c1, c2, c3 = st.columns(3)
@@ -1609,6 +1631,23 @@ def savings_goals_page(user: dict[str, Any]) -> None:
                          f"over approximately {progress['months']} month(s).")
             if goal["category"] == "Retirement Fund":
                 st.caption("This tracks your chosen savings target; it does not determine whether you can retire.")
+            with st.expander("Delete goal"):
+                if float(goal["saved"]) != 0.0:
+                    st.info("Use Withdraw savings below to transfer the full saved amount back to your account first.")
+                else:
+                    with st.form(f"delete_goal_{goal['id']}"):
+                        confirmed = st.checkbox("I want to delete this empty goal.", key=f"confirm_delete_{goal['id']}")
+                        delete_clicked = st.form_submit_button("Delete goal")
+                    if delete_clicked:
+                        if not confirmed:
+                            st.warning("Tick the confirmation box to delete this goal.")
+                        else:
+                            try:
+                                delete_savings_goal(st.session_state.username, goal["id"])
+                                st.session_state.goal_deleted_message = True
+                                st.rerun()
+                            except (BankingError, DataStoreError) as exc:
+                                st.error(str(exc))
     st.caption("Monthly estimates round partial months up and assume no interest or investment growth.")
 
     st.subheader("Move money")
